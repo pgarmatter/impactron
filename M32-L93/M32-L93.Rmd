@@ -1,0 +1,156 @@
+---
+title: "M32X-L93X - Lupus Eritematoso Sistêmico"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/M32-L93/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("M32-L93.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Dados desde agosto de 2013, com crescimento lento do número de pacientes até por volta de final de 2018, quando o número de pacientes passa a crescer mais rapidamente. Devido a esta alteração clara de tendência, seria interessante considerá-la na modelagem como um ponto de alteração. Variância maior no final da série que no início. 
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente metotrexato usado no tratamento, em duas dosagens diferentes.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+autoplot(soma, d1)
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois. Série estacionária na média. Com maior variância no final, como já observado.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios)
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2020, para ter pelo menos 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios ~ trend(knots = c(yearmonth('2018-12'))) + pdq(1,1,0)),
+        C = ARIMA(qt_total_usuarios),
+        D = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        E = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        F = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'G'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+
+```
+
+O modelo linear simples teve o melhor AIC (838.7420) para a base de treino até maio de 2020. O método selecionou o ARIMA(0,1,0)(0,0,1)[12] com drift apesar de não observada nenhuma sazonalidade na análise exploratória. Os modelos ARIMA tiveram AIC mais baixos (912.7365 sazonal, 908.1199 erros arima, 919.1998 proposto) que as alternativas, acima somente do LM. Para o modelo arima.trend (TSLM com erros arima e alteração de tendência), foi adicionado um nó de alteração de tendência em dezembro de 2018, onde foi observada a mudança.
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(nb.cast) #var da serie ou da série predita? 
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'G',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Os modelos lineares (GLM e LM) tiveram os REQMs mais altos (1561.1855 b.negativa, 1022.7239 LM). O LM teve o pior escore winkler, superior a 27000. Dos demais modelos, o arima.trend foi o mais bem sucedido tanto em REQM (226.2967) quanto em escore (1477.021), evidenciando a importancia de se considerar a alteração de tendência na modelagem. 
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+Com a análise das métricas REQM e escore, bem como dos gráficos, fica clara a escolha do modelo TSLM com erros arima e alteração de tendência em 2018/12.
+
+
+```{r}
+save.image('M32-L93.RData')
+```

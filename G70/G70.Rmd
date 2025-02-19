@@ -1,0 +1,173 @@
+---
+  title: "G70 - Miastenia Gravis"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/G70/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+
+load("G70.RData")
+
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios))
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios)
+```
+
+Não tem picos de variância tão pronunciados quanto em D59 ou D80-83.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão, não da para usar Poisson normal. 
+
+```{r}
+unique(tratamentos$no_procedimento)
+```
+
+Somente IMUNOGLOBULINA HUMANA é usada no tratamento, diversas doses.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial") +
+  labs(title = 'Número de pacientes de Miastenia Gravis', subtitle = 'tratados com medicamentos CEAF 1A')
+
+gg_tsdisplay(soma, y = d1 ,plot_type = "partial")
+```
+
+Estacionária, com picos de variância nos ultimos anos. PACF sugere AR 1 ou 2. ACF com decaimento lento. Devo analisar as (P)ACF da serie como é ou diferenciada? As ACFs são diferentes
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios), lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 24)
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) +
+  labs(title = 'Periodograma acumulado da série de pacientes de Miastenia Gravis')
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. Devido à superdispersão, não é possível para usar poisson no glm, mas quasi-poisson ou binomial negativa devem funcionar.
+Base separada temporalmente até maio de 2020, para ter 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,1) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios ~ 1 + pdq(2,1,1) + PDQ(0,0,0)),
+        C = ARIMA(qt_total_usuarios),
+        D = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        E = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        F = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'binom.neg'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+```
+
+Em questão de AIC, o modelo linear simples foi o melhor para a base de treino até maio de 2020. Novamente, o mesmo que foi visto no D59.
+
+# Análise de resíduos
+
+falta avaliar os intervalos de predição de quasip e nbinom.
+
+```{r}
+newdata <- soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(nb.cast) #var da serie
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'G',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Para Miastenia Gravis, a modelagem com menor escore de winkler foi Holt, como para D59 e D80-83. As raízes dos erros médios ficaram próximas entre os ARIMAs propostos (aprox 20.7 para ambos). 
+
+Analisar os gráficos e outras métricas para decidir entre AAN e os ARIMAs?
+
+```{r}
+models$arima
+```
+
+O arima automatico ajustou sazonalidade, o que não foi observado nos dados. O modelo com erros multiplicativos teve o dobro de erro que o AAN.
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model) +
+  ylab('quantidade de pacientes') +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes de Miastenia Gravis no SUS", 
+       subtitle = "a partir de 2020/06")
+
+```
+
+Os gráficos mostram que os intervalos dos ARIMAs 111 e 112 são diferentes (112 maior). Ainda assim, tanto o escore do 111 quanto seu REQM foram mais baixos que as mesmas métricas do 112, sendo o primeiro preferível entre os dois. O uso do método de Holt ainda é mais "seguro" que ambos, pois seu intervalo abarca melhor os valores observados no intervalo de validação.
+
+
+```{r}
+save.image('G70.RData')
+```

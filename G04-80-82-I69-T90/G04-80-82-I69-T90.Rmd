@@ -1,0 +1,220 @@
+---
+title: "G04-80-82-I69-T90 - Espasticidade"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/G04-80-82-I69-T90")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("G04-80-82-I69-T90.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Explorat?ria
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Tendencia aparentemente constante at? 2020, quando tem uma queda brusca e volta a subir. Mais de 10 anos de observa??es. Se comporta como a as Distonias E Espasmo Hemifacial, prop?e-se a modelagem anterior ? queda, para ver se tem muita diferen?a com o G24.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispers?o novamente.
+
+```{r}
+tratamentos
+```
+
+Somente toxina botulinica, em doses diferentes.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial") + 
+  labs(title = 'Número de pacientes de espasticidade', subtitle = 'tratados com medicamentos CEAF 1A')
+
+```
+
+A an?lise dos gr?ficos de autocorrela??o sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois. Mesmo que Distonias E Espasmo Hemifacial.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) + 
+  labs(title = 'Periodograma acumulado da série de pacientes de espasticidade')
+```
+
+ACF, LB e CPGRAM indicam n?o ser ru?do branco.
+
+# Modelagem
+
+Como s? tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como vari?vel preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente at? maio de 2021, para ter pelo menos 1 ano completo de dados para a valida??o.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/01"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+# binomial negativa n?o converge?
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) 
+
+```
+
+O modelo linear simples foi o melhor para a base de treino at? dezembro de 2019. O ARIMA selecionado pelo m?todo foi o ARIMA(0,1,3) com drift. Os AICs dos ARIMAs ficaram pr?ximos entre si (1660 para o autom?tico e 1671 para o AR(1) proposto). GLM com distribui??o binomial negativa teve melhor AIC que os m?todos de alisamento exponencial. No geral, os modelos se comportaram bastante como os de G24, mesmo modelando com dados at? dezembro do ano anterior.
+
+# An?lise de res?duos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/01"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+No que se refere a REQM, o ML teve o melhor desempenho (1145.46), mas seu escore ? o terceiro menor (16421.8). O menor escore, em contrapartida, foi do alisamento exponencial com erros multiplicativos (MAN:10537.6), por?m, este modelo teve o pior REQM (1709.22). O Arima proposto (1,1,0) com drift teve o pior escore winkler (22502.24) mas o segundo melhor REQM (1456.29).
+
+an?lise dos gr?ficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes com espasticidade no SUS", 
+       subtitle = "a partir de 2020/01")
+
+```
+
+Ajustando os modelos antes da presen?a da queda brusca no n?mero de pacientes, obt?m-se resultados piores que os observados para G24 (modelados com dados at? maio de 2020, incluindo o in?cio do decl?nio). Por outro lado, o intervalo crescente do m?todo MAN foi largo o suficiente para abarcar alguns dados observados nos 24 meses seguintes, como o seu escore sugeria. Os intervalos de predi??o dos outros m?todos foram incapazes de predizer a queda observada. Neste caso, seria interessante o uso do MAN para a modelagem, mas s? ? poss?vel afirmar isso conhecendo o futuro dos dados.
+
+Seria interessante tra?ar cen?rios conservadores com intervalos grandes, ao mesmo tempo que se usam modelos mais "certeiros" para cen?rios agressivos? Na pr?tica, faz sentido ter mais de um modelo para os dados e utiliz?-los de acordo com o que o analista acredita? (risco de vi?s??)
+  
+Remodelando com a data em maio
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+# binomial negativa n?o converge?
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) 
+
+```
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+  
+```{r}
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes com espasticidade no SUS", 
+       subtitle = "a partir de 2020/06")
+```
+
+  
+```{r}
+save.image('G04-80-82-I69-T90.RData')
+```

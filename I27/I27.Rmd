@@ -1,0 +1,155 @@
+---
+title: "I27X - Hipertensão Arterial Pulmonar"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+pdf_document: default
+html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/I27/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("I27.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Bastantes dados para uma análise. Não tem uma curva tão ingreme no início como para outros PCDTs, em que removemos os dados para dar maior estabilidade às series. Neste caso, o aumento de pacientes desde a incorporação se deu rapidamente durante o primeiro ano e mais lentamente após, com alguma variância, mas nenhuma aparentemente muito influente.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente sildenafila usado no tratamento, em três dosagens diferentes.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+autoplot(soma, d1)
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois. Série estacionária na média.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios)
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2020, para ter pelo menos 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'binom.neg'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+
+```
+
+O modelo linear simples foi o melhor (1433.021) para a base de treino até maio de 2020. O método selecionou o ARIMA(0,2,1)(1,0,0)[12] apesar de a série diferenciada ter estacionaridade na média, foi realizada mais uma diferenciação nesta modelagem. Além disso, o modelo capturou um componente AR(1) sazonal que não foi percebido na análise dos gráficos. Ambos os modelos ARIMA tiveram AICs superiores  (1467.275 sazonal, 1481.115 proposto) ao restante dos modelos, superados somente pelo LM.
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Quanto às métricas REQM e escore winkler, o modelo de alisamento exponencial de Holt obteve o menor REQM (162.3355) com escore 1737.494, o quarto menor. Entre os ARIMAs ajustados, o sazonal teve melhor REQM (195.3512) em comparação ao modelo proposto pela análise das FACs (312.4247). Por outro lado, o modelo proposto obteve um melhor escore (1370.601) que o sazonal (1874.497). O LM, apesar do baixo AIC, teve um REQM maior que os modelos de séries temporais (443.0318).
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+Apesar do escore baixo, o modelo ARIMA proposto diverge da média observada na base de validação. O ARIMA sazonal e o AAN (Alisamento exponencial de Holt) não apresentam a mesma divergencia, ao mesmo tempo que mantém intervalos preditivos enxutos se comparados ao intervalo do MAN (alisamento exponencial com erros multiplicativos). Entre eles, sugere-se o uso de AAN para a modelagem futura, pois apresenta um bom ajuste, baixos erros e intervalo preditivo menor que as alternativas.
+
+
+```{r}
+save.image('I27.RData')
+```

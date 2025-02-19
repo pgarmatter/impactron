@@ -1,0 +1,170 @@
+---
+title: "D693 - Púrpura Trombocitopênica Idiopática"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/D693/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+
+load("D693.RData")
+
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios))
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios)
+```
+
+Maior variância a partir de 2020
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão, não da para usar Poisson normal.(Todos vão ser assim?)
+
+```{r}
+unique(tratamentos$no_procedimento)
+```
+
+Somente IMUNOGLOBULINA HUMANA é usada no tratamento, diversas doses.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial") +
+  labs(title = 'Número de pacientes de Púrpura Trombocitopênica Idiopática', subtitle = 'tratados com medicamentos CEAF 1A')
+
+gg_tsdisplay(soma, y = d1 ,plot_type = "partial")
+```
+
+Estacionária, com picos de variância nos ultimos anos. PACF sugere AR 1. ACF com decaimento lento (Sobe de volta por volta de lag 20?). 
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios), lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 24)
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) +
+  labs(title = 'Periodograma acumulado da série de pacientes de Púrpura Trombocitopênica Idiopática')
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. Devido à superdispersão, não é possível para usar poisson no glm, mas quasi-poisson ou binomial negativa devem funcionar.
+Base separada temporalmente até maio de 2020, para ter 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'binom.neg'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+```
+
+Como com os outros PCDTs que usam somente imunoglubulina humana do CEAF1a analisados até agora (D59, D80-83, G70), o modelo linear simples foi o melhor para a base de treino até maio de 2020. 
+
+# Análise de resíduos
+
+falta avaliar os intervalos de predição de quasip e nbinom.
+
+```{r}
+newdata <- soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(nb.cast) #var da serie
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Para Púrpura Trombocitopênica Idiopática, a modelagem com menor escore de winkler foi o ARIMA 111 com drift (segundo em REQM). Holt ficou em terceiro para REQM, atrás de LM e ARIMA 111, e segundo para winkler (atrás somente do ARIMA 111 com drift).
+
+```{r}
+models$arima
+```
+
+O arima automatico ajustou o modelo proposto pela análise da ACF e da PACF, ao modelo manual foi adicionado drift. (Como avaliar a necessidade de drift nos dados? Estacionaridade da diferenciada?). O modelo com erros multiplicativos teve o dobro de erro que o AAN. O modelo linear, apesar de bom REQM (menor de todos), apresentou o maior escore winkler, sendo descartado.
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model) +
+  ylab('quantidade de pacientes') +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes de Púrpura Trombocitopênica Idiopática no SUS", 
+       subtitle = "a partir de 2020/06")
+
+```
+
+O ARIMA automático (111 sem drift) se assemelha muito de um naive com erros acumulados, mantendo a média estacionária. O ARIMA 111 com drift teve um desempenho melhor que o sem drift. Diferente dos PCDTs anteriores, Púrpura Trombocitopênica Idiopática é melhor modelado por ARIMA 111 com drift. (Não avaliano nb e qp).
+
+
+```{r}
+save.image('D693.RData')
+```

@@ -1,0 +1,156 @@
+---
+title: "E230 - Deficiência do hormônio de crescimento"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/E230/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("E230.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Além de pouco tempo de observação nos dados, têm-se poucos pacientes. Possívelmente precisaremos separar em treino e validação com 1 ano para validar.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente somatropina e agonistas da somatropina são usadas no tratamento, em doses diferentes.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+gg_tsdisplay(soma %>% filter(ano_mes < yearmonth("2021/06")), y = qt_total_usuarios ,plot_type = "partial")
+```
+
+A análise de ambos os gráficos de autocorrelação sugerem AR(1) ou ARMA(1,2) para a série, tanto para a série inteira quanto para a base de treino isolada. Ambos os gráficos são senoidais amortecidos apos um pico inicial, aparentemente infinitos.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) + 
+  labs(title = 'Periodograma acumulado da série de pacientes de deficiência do hormônio do crescimento')
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2021, para ter pelo menos 1 ano completo de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2021/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+# binomial negativa não converge?
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) 
+
+```
+
+O modelo linear simples foi o melhor para a base de treino até maio de 2021. O ARIMA selecionado pelo método foi o ARIMA(0,1,0) com drift novamente (como para Adalimumabe em PCDTs monodroga), o que corresponde a um drift com erros ruído branco. Este modelo ficou atrás do modelo linear simples. O modelo linear generalizado com binomial negativa teve o pior AIC, além de ter esgotado as iterações permitidas por padrão pelo método (falha na convergência?).
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2021/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Quanto ao REQM, quatro dos modelos ficaram abaixo de 13, somente Holt atingiu 29.34. Quanto aos escores winkler, o modelo que teve uma melhor aproximação dos dados reais foi o proposto pela análise das autocorrelações, ARIMA(1,1,2) com drift (escore 31.78) seguido pelo arima automático ((0,1,0) com drift, com escore 50.48).
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes com decifiência do hormônio do crescimento no SUS", 
+       subtitle = "a partir de 2021/06")
+```
+
+Houve uma maior variância ao final do período de validação do que durante o período de treino. Dessa forma, o modelo linear simples, apesar de ter o melhor ajuste à base de treino, não foi capaz de predizer o comportamento futuro dos pacientes. Por outro lado, os modelos ARIMA propostos ambos conseguiram predizer melhor que o LM. É interessante observar que os ARIMAs mantém os valores preditos logo no início do periodo de validação próximos aos últimos observados, algo que o LM não fez. Assim, os ARIMAs tiveram mais acertos no início da predição que o concorrente. Além disso, a propriedade dos ARIMAs de propagar as incertezas, aumentando o intervalo preditivo, permitiu que os valores mais futuros (12 meses) ainda estivessem dentro de seu intervalo de predição. Os modelos de alisamento exponencial tiveram intervalos preditivos muito largos para serem úteis, fato evidenciado pelos seus escores e pelos gráficos.
+Neste caso, o modelo escolhido seria o ARIMA(1,1,2) com drift, pelo seu escore melhor que os concorrentes, com REQM próximos.
+
+
+```{r}
+save.image('E230.RData')
+```

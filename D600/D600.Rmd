@@ -1,0 +1,169 @@
+---
+  title: "D600 - Aplasia Pura Adquirida Crônica Da Série Vermelha"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/D600/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+
+load("D600.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  fill_gaps() %>% 
+  replace_na(list(qt_total_usuarios = 0)) %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+Como há meses em que nenhum paciente foi tratado, esses meses foram preenchidos com zero.
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Pouquissimos usuários, seria possível modelar?
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Tendo tão poucos pacientes, é possível que a média e a variância não impeçam o uso de Poisson (ainda que não idênticas).
+
+```{r}
+unique(tratamentos$no_procedimento)
+```
+
+Somente IMUNOGLOBULINA HUMANA é usada no tratamento, diversas doses.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial") +
+  labs(title = 'Número de pacientes de Aplasia Pura Adquirida Crônica Da Série Vermelha', subtitle = 'tratados com medicamentos CEAF 1A')
+
+
+gg_tsdisplay(soma, y = d1 ,plot_type = "partial")
+```
+
+Estacionária. Análise dos gráficos de autocorrelação sugere AR(1).
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios), lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 24)
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) +
+  labs(title = 'Periodograma acumulado da série de pacientes de aplasia pura adquirida crônica da série vermelha')
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. Foi feita uma tentativa de usar poisson no glm. Base separada temporalmente até maio de 2020, para ter 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 0 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+poisson.model = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = poisson())
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('poisson'), AIC = c(AIC(poisson.model)))) 
+```
+
+Como com os outros PCDTs que usam somente imunoglubulina humana do CEAF1a analisados, o modelo linear simples foi o melhor para a base de treino até maio de 2020. O Poisson ficou pior que os ARIMAs, mas melhor que os métodos com tendencia aditiva.
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+poisson.cast = predict(poisson, newdata = newdata, type='response')
+poisson.cast = fable(.model = 'F',
+                     ano_mes = unique(cast$ano_mes),
+                     qt_total_usuarios = dist_poisson(poisson.cast),
+                     mean = poisson.cast,
+                     d1 = c(NA, diff(poisson.cast)),
+                     response = 'qt_total_usuarios',
+                     distribution = 'qt_total_usuarios')
+
+# gera o intervalo de predição de 80 e 95%
+# 
+# hilo(dist_poisson(poisson.score), 80)
+# hilo(dist_poisson(poisson.score), 95)
+cast <- cast %>% 
+  bind_rows(poisson.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+O ARIMA automático foi o ARIMA(0,1,3), diferente do esperado pela análise da PACF. Tanto em REQM e escore Winkler, o modelo linear generalizado com distribuição poisson obteve os melhores resultados, com REQM = 0.9542837 e winkler = 5. O segundo melhor escore atingiu o valor de 9.23, quase o dobro que o GLM.
+
+```{r}
+models$arima
+```
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model) +
+  ylab('quantidade de pacientes') +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes de aplasia pura adquirida crônica no SUS", 
+       subtitle = "a partir de 2020/06")
+
+```
+
+Pelo fato de a série estar tão perto de zero (tendo zeros em alguns momentos), os intervalos de predição acabam incluindo valores abaixo de zero, que são impossíveis. O winkler dos modelos aponta para a preferência do MAN para a predição. Por outro lado, o GLM com distribuição poisson garante valores não negativos, ao mesmo tempo que obteve os melhores REQM e escore Winkler.
+Sem dúvida, o melhor modelo entre os avalidos para D600 é o GLM com distribuição poisson.
+
+
+```{r}
+save.image('D600.RData')
+```

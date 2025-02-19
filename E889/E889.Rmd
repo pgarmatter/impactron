@@ -1,0 +1,155 @@
+---
+title: "E889 - Deficiência de Biotinidase"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/E889/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("E889.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Dados disponíveis desde dezembro de 2019, poquíssimo para ajustar um modelo e validá-lo. Número de pacientes baixo, entre 4 e 61.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente Biotina usada no tratamento, somente uma dose.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios)
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2021, para ter pelo menos 1 ano completo de dados para a validação (um ano e meio de treino).
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2021/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+
+```
+
+O modelo linear simples foi o melhor para a base de treino até maio de 2021. O ARIMA selecionado pelo método foi o ARIMA(0,1,0) com drift, correspondente a um processo de drift com erros WN, diferente do proposto pela análise dos gráficos. Para este PCDT os AICs dos modelos ARIMA foram melhores que os das abordagens utilizando alisamento exponencial. Entre os ARIMAs houve pouca diferença de AIC (87.15667 para o modelo automatico e	87.29553 para o proposto).
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2021/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+
+Como com o AIC, o lm foi o melhor modelo quando avaliados os REQMs, porém, não obteve um bom escore (82.64) quando comparado aos modelos alternativos. Os modelos ARIMA, por sua vez, tiveram melhores escores (50.48 para o modelo automatizado e 34.11 para o proposto), mantendo um REQM baixo (10.44 para o modelo automatizado e 12.44 para o modelo proposto, contra 9.7 do lm). 
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+O volume de dados utilzado na modelagem foi bem menor que para outros PCDTs (somente um ano e meio). Por isso, é importante obter mais dados antes de escolher uma modelagem, pois muito do comportamento da difusão pode não ter sido observada ainda. Observa-se que nenhum dos modelos foi capaz de predizer a queda no número de pacientes ao final de 2021. As métricas utilizadas apontam para o uso do ARIMA(1,1,0) com drift, mas o resultado pode não ser conclusivo.
+
+
+```{r}
+save.image('E889.RData')
+```

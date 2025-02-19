@@ -1,0 +1,399 @@
+---
+title: "M33 - Dermatomiosite E Polimiosite"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+  html_document: 
+  toc: yes
+  fig_width: 16 
+  fig_height: 8
+  fig_caption: yes
+html_notebook: 
+  toc: yes
+  fig_width: 16
+  fig_height: 8
+  fig_caption: yes
+word_document: 
+  fig_width: 16
+  fig_height: 8
+  fig_caption: yes
+  toc: yes
+---
+  
+```{r setup, message=FALSE, warning=FALSE}
+library(fpp3)
+library(tidyverse)
+# library(RPostgres)
+library(DBI)
+library(GGally)
+library(ggdist)
+library(ggfortify)
+library(MASS)
+library(splines)
+library(patchwork)
+library(distributional)
+
+setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/M33/")
+load("M33.RData")
+
+if(exists("meds.bkp")){
+  meds <- meds.bkp
+}
+
+select <- dplyr::select
+
+```
+
+# Exploratória Soma
+
+```{r}
+autoplot(soma, qt_total_usuarios) + 
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+```{r, media variancia}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+Apesar de bastantes observações, média e variância diferentes. É possível fazer análises, mas não utilizar Poisson no GLM (superdispersão).
+
+```{r, time series soma}
+gg_tsdisplay(soma, y = qt_total_usuarios, plot_type = "partial")
+```
+
+FAC e FACP sugerem processo AR(1). Série diferenciada bastante estacionária, certa variância maior perto do final.
+
+```{r ljung-box soma}
+(lb12 = format(ljung_box(soma$qt_total_usuarios, lag = 12)["lb_pvalue"], nsmall = 4))
+(lb24 = format(ljung_box(soma$qt_total_usuarios, lag = 24)["lb_pvalue"], nsmall = 4))
+```
+
+Os testes de Ljung-Box para 12 e 24 meses rejeita a hipótese nula de que a série seja ruído branco com valores de p iguais a `r lb12` e `r lb24`.
+
+```{r periodograma acumulado soma}
+ggcpgram(soma$qt_total_usuarios) + 
+  labs(title = 'Periodograma acumulado da série de pacientes de dermatomiosite e polimiosite.')
+
+```
+
+Tudo indica que a soma pode ser modelada.
+
+# Modelagem Soma
+
+Modelo proposto ARIMA(1,1,0) com drift e sem sazonalidade.
+
+```{r modelagem soma}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+nb.label = "F"
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', nb.label), AIC = c(NA, AIC(binomialneg)))) 
+```
+
+O modelo E (TSLM em função do tempo) teve o melhor AIC entre os modelos ajustados (931.4996). O modelo ARIMA(1,1,0) com drift (A), proposto pela análise das FAC, seguiu em segundo com AIC 1063.5835.
+
+# Análise de resíduos (soma)
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = nb.label,
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+O modelo E teve o melhor desempenho dos modelos ajustados, com REQM e escore menores que os concorrentes.
+
+# Análise dos gráficos Soma
+
+```{r gráficos soma}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") +
+  scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes com dermatomiosite e polimiosite no SUS", 
+       subtitle = "a partir de 2020/06")
+
+```
+
+A análise dos gráficos corrobora a conclusão de que o modelo E seja o melhor candidato entre os modelos ajustados.
+
+# Análises de medicamentos
+
+```{r}
+tratamentos %>% 
+  select(no_identificador, via, linha_tto, doses_min, doses_max) %>% 
+  unique()
+```
+
+Dá-se prioridade ao tratamento com metotrexato injetável, seguindo com imunoglobulina humana ou metotrexato oral.
+
+```{r rechaveamento de meds}
+meds <- meds %>% 
+  mutate(key = paste(no_identificador, via, sep = '_')) %>% 
+  as_tsibble(key = key, index = ano_mes)
+```
+
+Como a abordagem de modelagem da diferenciada da tendência não foi satisfatória para M45, o método não foi reproduzido para outros PCDTs. Segue-se para as outras análises.
+
+```{r diferenciada por linha tratamento}
+# removendo diferenças maiores que +-200, pois são outliers e dificultam a visualização do restante.
+meds <- meds %>% mutate(d1 = difference(qt_usuarios))
+
+meds %>% 
+  filter(d1 > -200 & d1 < 200) %>% 
+  ggplot(aes(x = as.ordered(linha_tto), y = d1, colour = key)) + 
+  geom_boxplot() +
+  labs(title = "Por linha de tratamento")
+
+```
+
+Não parece haver diferença entre as médias de difusão entre linhas de tratamento.
+
+```{r diferenciada por qt_concorrentes}
+meds %>% 
+  filter(d1 > -200 & d1 < 200) %>% 
+  ggplot(aes(x = qt_concorrentes, y = d1, colour = key, group = interaction(key, qt_concorrentes))) + 
+  geom_boxplot() + 
+  facet_wrap(~key) + 
+  labs(title = "Por qt_concorrentes")
+```
+
+Apesar de pouco expressivo, o aumento no número de concorrentes parece diminuir a taxa de difusão dos medicamentos.
+
+```{r por qt_total_usuarios e ano_mes}
+meds %>% 
+  filter(d1 > -200 & d1 < 200) %>% 
+  ggplot(aes(x = qt_total_usuarios, y = d1)) + 
+  geom_line() +
+  labs(title = "Por qt_total_usuarios") +
+  facet_wrap(~key)
+
+meds %>% 
+  filter(d1 > -200 & d1 < 200) %>% 
+  ggplot(aes(x = ano_mes, y = d1)) + 
+  geom_line() +
+  labs(title = "Por ano_mes") +
+  facet_wrap(~key)
+```
+
+Finalmente, as séries diferenciadas parecem razoavelmente estacionárias na média com o aumento no número total de pacientes, bem como com o passar do tempo (altamente correlacionado com o número de pacientes total), salvo abatacepte e certolizumabe pegol, que tendem a diminuir com o tempo. Não parece haver uma diferença considerável na variância com o decorrer do tempo para os outros medicamentos.
+
+## Seguindo com a modelagem dos medicamentos
+
+```{r periodogramas acumulados}
+for(i in unique(meds$key)) {
+  print((meds %>%
+           filter(key == i) %>%
+           as_tibble() %>%
+           select(qt_usuarios))$qt_usuarios %>%
+          ggcpgram() + 
+          labs(title = paste("Periodograma acumulado", i)))
+}
+```
+
+Os periodogramas acumulados de pacientes de todos os medicamentos apontam para a existência de componente sistemático a ser modelado.
+
+```{r}
+meds %>% 
+  as_tibble() %>% 
+  group_by(key) %>% 
+  summarise(inicio = min(ano_mes), 
+            final = max(ano_mes), 
+            total_meses = n())
+```
+
+Há dados suficientes para a modelagem de todas as drogas.
+
+```{r tsplot (meds)}
+# removendo os medicamentos não modelados.
+meds.bkp <- meds
+
+#remover medicamentos a não serem modelados
+# meds <- meds %>% filter(!(no_identificador %in% c("BAMGPOCO60432")))
+
+for(i in unique(meds$key)) {
+  print(
+    meds %>%
+      filter(key == i) %>%
+      gg_tsdisplay(qt_usuarios, plot_type = "partial") +
+      labs(title = paste("Gráficos temporais da série de pacientes de", i))
+  )
+}
+```
+
+A análise dos gráficos de autocorrelação (ACF) e autocorrelação parcial (PACF) sugerem que todas as séries de medicamentos sigam processos AR(1): ACF decrescente infinito e PACF com pico em lag 1 e zero dali em diante. Salvo algumas exceções, todas as séries parecem bastante estacionárias na média. O uso de abatacepte diminui até quase zero ao final da série, um comportamento que provavelmente não será capturado pelos modelos ajustados. A queda no número de pacientes de etanercepte, contudo, se inicía mais cedo, o que talvez possibilite os modelos que estimem melhor o comportamento subsequente. Por fim, metotrexato intrevenoso apresenta maior variância na série toda relativo aos demais medicamentos.
+
+```{r modelagem (meds)}
+meds.treino <- meds %>% filter(ano_mes < yearmonth("2020/06")) %>% select(-d1)
+
+meds.models <- meds.treino %>%
+  model(
+    A = ARIMA(qt_usuarios ~ 1 + pdq(1, 1, 0) + PDQ(0, 0, 0)),
+    B = ARIMA(qt_usuarios),
+    C = ARIMA(qt_usuarios ~ qt_concorrentes + qt_total_usuarios + pdq()),
+    D = decomposition_model(
+      STL(qt_usuarios ~ trend()),
+      ARIMA(trend ~ qt_concorrentes + qt_total_usuarios),
+      NAIVE(remainder)
+    ),
+    E = ETS(qt_usuarios ~ error("A") + trend("A") + season("N")),
+    F = ETS(qt_usuarios ~ error("M") + trend("A") + season("N")),
+    G = TSLM(qt_usuarios)
+  )
+
+meds.models %>% 
+  select(key, B:D)
+```
+
+Não foi possível ajustar modelos lineares com erros ARIMA, nem modelos de decomposição em trend+remainder para tofacitinibe, leflunomida e metotrexato. Isso se deve a só haver um número de concorrentes para cada uma dessas drogas no decorrer da base de treino. Assim, os modelos que tomam qt_concorrente como parâmetro não foram possíveis de ajustar.
+
+
+```{r análise de resíduos (acurácia de treino)}
+mm.t.acc <- meds.models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NaN) %>% 
+  select(-.type) %>% 
+  relocate(key, .model, periodo, REQM)
+```
+
+```{r análise de resíduos (acurácia de predição )}
+# meds.models forecast accuracy 12 e 24
+
+newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 12)
+
+meds.cast.12 <- meds.models %>% 
+  forecast(new_data = newdata)
+
+mm.f.acc.12 <- meds.cast.12 %>%
+  accuracy(meds,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>%
+  mutate(periodo = 12) %>% 
+  select(-.type) %>% 
+  relocate(key, .model, periodo, REQM, winkler) %>% 
+  arrange(key, .model)
+
+# 24
+newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 24)
+
+meds.cast.24 <- meds.models %>% 
+  forecast(new_data = newdata)
+
+mm.f.acc.24 <- meds.cast.24 %>%
+  accuracy(meds,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>%
+  mutate(periodo = 24) %>% 
+  select(-.type) %>% 
+  relocate(key, .model, periodo, REQM, winkler) %>% 
+  arrange(key, .model)
+
+(mm.f.acc <- mm.t.acc %>% 
+    union(mm.f.acc.12) %>% 
+    union(mm.f.acc.24) %>% 
+    filter(!is.na(REQM)) %>% 
+    arrange(key, .model) %>% 
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>% 
+    pivot_wider(names_from = periodo, 
+                values_from = value, 
+                names_prefix = "v."))
+```
+
+A tabela acima apresenta as métricas dos modelos quando avaliados quanto aos seu resíduos em relação à base de treino e aos dados reais para 12 e 24 meses. 
+
+```{r Avaliação das métricas conjuntamente, somente menores}
+
+for(i in unique(meds$key)){
+  aux <- mm.f.acc %>%
+    filter(key == i) %>% 
+    group_by(key, metrica) %>%
+    slice_min(v.0, n = 2, na_rm = T) %>% 
+    ungroup() %>%
+    union(mm.f.acc %>%
+            filter(key == i) %>% 
+            group_by(key, metrica) %>%
+            slice_min(v.12, n = 2, na_rm = T) %>%
+            ungroup()) %>%
+    union(mm.f.acc %>%
+            filter(key == i) %>% 
+            group_by(key, metrica) %>%
+            slice_min(v.24, n = 2, na_rm = T) %>% ungroup) %>%
+    select(key, .model) %>%
+    unique()
+  
+  aux %>% 
+    inner_join(mm.f.acc, by = c("key", ".model")) %>%
+    arrange(key, metrica, .model) %>% 
+    knitr::kable(caption = paste("Modelos para", i, "e suas métricas.")) %>% 
+    # knitr::kable(caption = paste("Modelos para", i, "e suas métricas."), format = "latex") %>%
+    print()
+  
+  print(
+    meds.cast.24 %>%
+      inner_join(aux, by = c("key", ".model")) %>%
+      autoplot(meds) +
+      scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y') +
+      facet_wrap( ~ .model, scales = "free") +
+      geom_vline(xintercept = as.Date(max(
+        meds.treino$ano_mes
+      ) + c(12, 24)), colour = "red") +
+      labs(title = paste("Modelos ajustados para ", i), 
+           caption = "linhas verticais representam 12 e 24 meses de predição.")
+  )
+}
+
+```
+
+Já as tabelas e gráficos acima apresentam somente os modelos com os melhores REQM e escore Winkler. Sendo eles:
+  
+### Imunoglobulina humana
+
+### Metotrexato injetável
+
+### Metotrexato oral
+
+
+```{r}
+save.image(file = "M33.RData") 
+```
+
+# Conclusões
+
+Para a modelagem da demanda total, sugere-se o uso do modelo ARIMA(0,1,0)(1,0,0)[12] com drift ou ARIMA(1,1,0) com drift. Preferivelmente o primeiro, por ter métricas melhores.
+

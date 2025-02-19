@@ -1,0 +1,156 @@
+---
+title: "E232 - Diabetes Insípido"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/E232/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("E232.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Bastantes dados para uma análise. Possívelmente interessante descartar o primeiro mes, por ser muito diferente dos subsequentes (início na metade do mes ou para o final? tempo para disponibilização?). Depois desse período, parece crescer consistentemente até 2022, com alguma variânca maior entre 2017 e 2019.
+
+```{r}
+soma <- soma %>% filter(ano_mes > min(ano_mes) + 1)
+
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente Acetato de desmopressina usada no tratamento, diferentes dosagens.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois. Além disso, observa-se que a remoção dos dois primeiros meses dos dados deixa a curva mais estável, possívelmente facilitando o ajuste e as predições subsequentes.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios)
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2020, para ter pelo menos 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+
+```
+
+O modelo linear simples foi o melhor para a base de treino até maio de 2020. O ARIMA selecionado pelo método foi o ARIMA(0,1,3) com drift, diferente do proposto pela análise dos gráficos. Para este PCDT os AICs dos modelos ARIMA foram melhores que os das abordagens utilizando alisamento exponencial e que o GLM com distribuição binomial negativa. Entre os ARIMAs, o (0,1,3) teve melhor AIC (1503.24) que o proposto (1,1,0) (1511.84).
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+O modelo ARIMA selecionado pelo método (0,1,3), teve tanto o melhor REQM (197.3404) quanto o melhor escore winkler (930.1898). O ARIMA proposto teve um REQM parecido que o citado (198.1762), mas um escore inferior (1527.9611). O LM teve o pior REQM de todos os modelos avaliados (264.5942).
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+Os modelos de alisamento exponencial tiveram intervalos maiores que outros modelos, o que aumentou o escore de ambos. Os dois modelos ARIMA contiveram em seus intervalos preditivos todos os dados observados no período de validação. Dada a análise dos gráficos e das métricas, o modelo a ser utilizado seria o ARIMA(0,1,3) com drift, selecionado pelo método.
+
+
+```{r}
+save.image('E232.RData')
+```

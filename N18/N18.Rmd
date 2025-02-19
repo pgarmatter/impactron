@@ -1,0 +1,160 @@
+---
+title: "N18 - Anemia Na Doença Renal Crônica"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/N18/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("N18.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y') + 
+  scale_y_continuous(breaks = seq(20000, 120000, 10000))
+```
+
+Dados disponíveis desde 2010.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente Alfaepoetina usada no tratamento, em doses diferentes.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial") + 
+  labs(title = 'Número de pacientes de anemia na doença renal crônica', subtitle = 'tratados com medicamentos CEAF 1A')
+
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) + 
+  labs(title = 'Periodograma acumulado da série de pacientes de anemia na doença renal crônica')
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2020, para ter pelo menos 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios ~ 1 + pdq(3,1,0) + PDQ(0,0,0)),
+        C = ARIMA(qt_total_usuarios),
+        D = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        E = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        F = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'G'), AIC = c(NA, AIC(binomialneg)))) 
+
+```
+
+O modelo linear simples foi o melhor para a base de treino até maio de 2020. O ARIMA selecionado pelo método foi o ARIMA(0,1,0) com drift, correspondente a um processo de drift com erros WN, diferente do proposto pela análise dos gráficos. Os AICs dos ARIMAs ficaram próximos entre si (2345.728 para o drift e 2345.709 para o AR(1)). 
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'G',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+
+```
+
+Os métodos de alisamentos exponencial foram os que tiveram os melhores REQMs entre os modelos ajustados. Por outro lado, os escores de winkler dos modelos ARIMA foram melhores que as outras alternativas. O escore da binomial negativa (se calculado corretamente?) foi mais de três vezes o valor do arima(0,1,0) com drift.
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free", nrow = 2) +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes com anemia da doença renal crônica no SUS", 
+       subtitle = "a partir de 2020/06")
+
+```
+
+A partir de cerca de 12 meses, o número de pacientes tem uma queda que nenhum modelo foi capaz de capturar, apesar de estar dentro dos intervalos de predição tanto dos métodos de alisamneto exponencial quanto dos ARIMAs. Em questão de média, o modelo a ser escolhido seria o alisamento exponencial de Holt (AAN), por ser mais simples que o MAN. Mesmo assim, não seria recomendado o uso dos modelos para mais de 12 meses, pois o intervalo preditivo cresce muito (justificativa para essa afirmação?)
+
+
+```{r}
+save.image('N18.RData')
+```

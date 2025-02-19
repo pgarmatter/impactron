@@ -1,0 +1,160 @@
+---
+title: "E221 - Hiperprolactinemia"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+pdf_document: default
+html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/E221/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("E221.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Bastantes dados para uma análise. Possívelmente interessante descartar os primeiros meses, por serem muito diferentes dos subsequentes. Depois desse período, parece crescer consistentemente até 2018. Depois deste período, bastante variância (três quedas bruscas no número de pacientes, uma por ano entre 2019 e 2020, ao final do ano). 2021 não replicou o comportamento de queda no final do ano como nos três anos anteriores. Pouco provável ter relação com a pandemia de covid, uma vez que a primeira queda se deu em 2018. Dado este comportamento sazonal ao final da série, talvez seja interessante adicionar uma componente sazonal também na modelagem.
+
+```{r}
+soma <- soma %>% filter(ano_mes > min(ano_mes) + 1)
+
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente Cabergolina usado no tratamento, uma dosagem.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1) ou AR(4), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois, com um pico pouco significativo no lag 4. Além disso, observa-se que a remoção dos dois primeiros meses dos dados deixa a curva mais estável, possívelmente facilitando o ajuste e as predições subsequentes.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios)
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2020, para ter pelo menos 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ()),
+        B = ARIMA(qt_total_usuarios ~ 1 + pdq(4,1,0) + PDQ()),
+        C = ARIMA(qt_total_usuarios),
+        D = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        E = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        F = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'G'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+
+```
+
+O modelo linear simples foi o melhor (1702.404) para a base de treino até maio de 2020. O ARIMA selecionado pelo método foi o ARIMA(3,1,0) com drift, e teve melhor AIC (1927.639) que os dois modelos propostos. Entre os propostos pela análise das FACs, o AR(4) teve AIC menor (1929.461) que o AR(1) (1945.750). Os demais modelos tiveram AICs superiores a 2000. Apesar da tentativa de adicionar componentes sazonais, devido às quedas de número de pacientes no fim dos anos 2018 e 2019, as modelagens não encontraram parâmetros para explicar a autocorrelação sazonal. 
+Seria interessante remodelar utilizando somente esses anos? Arriscado, pois teria menos observações que o ideal (50+).
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'G',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Apesar do baixo AIC, o LM não teve um bom REQM (2140.3977) quando comparado aos modelos ARIMA. Entre os três ARIMAs ajustados, o menor REQM foi o do AR(1) (971.8634), mas teve o maior escore entre os três (10413.825). Por outro lado, o AR(4) proposto teve o segundo REQM dos ARIMAs (1026.3812) e o melhor escore entre todos os modelos ajustados (6823.046).
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+Ainda que as métricas analisadas apontem para a seleção do modelo ARIMA(4,1,0) com drift, nenhum dos modelos foi capaz de predizer a queda ao final do ano seguinte à última data da base de treino. Além disso, os modelos não contemplaram a componente sazonal (ou ciclica?) observada nos últimos dois anos.
+
+Com mais observações, seria interessante modelar considerando essa sazonalidade, bem como verificar se o mesmo fenômeno ocorre nos anos seguintes.
+
+
+```{r}
+save.image('E221.RData')
+```

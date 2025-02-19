@@ -1,0 +1,172 @@
+---
+title: "D80X, D83X - Imunodeficiência Primária Com Predominância De Defeitos De Anticorpos"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/D80-83")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+
+load("D80-83.RData")
+
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios))
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios)
+```
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão, não da para usar Poisson normal. 
+
+```{r}
+unique(tratamentos$no_procedimento)
+```
+
+Somente IMUNOGLOBULINA HUMANA é usada no tratamento, diversas doses.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial") +
+  labs(title = 'Número de pacientes de Imunodeficiência primária com predominância de defeitos de anticorpos', subtitle = 'tratados com medicamentos CEAF 1A')
+
+gg_tsdisplay(soma, y = d1 ,plot_type = "partial")
+```
+
+Estacionária, com picos de variância nos ultimos anos. PACF sugere AR 1 ou 3. ACF com decaimento lento.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios), lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 24)
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) +
+  labs(title = 'Periodograma acumulado da série de pacientes de Imunodeficiência Primária Com Predominância De Defeitos De Anticorpos')
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. Devido à superdispersão, não é possível para usar poisson no glm, mas quasi-poisson ou binomial negativa devem funcionar.
+Base separada temporalmente até maio de 2020, para ter 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,1) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios ~ 1 + pdq(3,1,1) + PDQ(0,0,0)),
+        C = ARIMA(qt_total_usuarios),
+        D = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        E = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        F = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'binom.neg'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+```
+
+Em questão de AIC, o modelo linear simples foi o melhor para a base de treino até maio de 2020. O mesmo que foi visto no D59.
+
+# Análise de resíduos
+
+falta avaliar os intervalos de predição de quasip e nbinom.
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+# media da binomial negativa, do manual de dist_negative_binomial-> m = pr/(1-p), em que p = theta, r = tamanho da amostra
+# encontrar o tamanho da amostra -> r = m(1-p)/p
+
+theta = binomialneg$theta
+
+binomialneg.cast = predict.glm(binomialneg, newdata = newdata, type = 'response')
+
+# p from theta?
+p = dnbinom(100, mu=binomialneg.cast, theta)
+
+binomialneg.cast = fable(.model = 'binom.neg',
+                     ano_mes = unique(cast$ano_mes),
+                     qt_total_usuarios = dist_negative_binomial(size = binomialneg.cast * (1-p)/ p,
+                                                                prob = p),
+                     mean = binomialneg.cast,
+                     d1 = c(NA, diff(binomialneg.cast)),
+                     response = 'qt_total_usuarios',
+                     distribution = 'qt_total_usuarios')
+
+cast <- cast %>% 
+  bind_rows(binomialneg.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Melhor winkler score entre os modelos foi para AAN (erro e tendencia aditivos, sem sazonalidade - método linear de Holt), o mesmo modelo ficou com o segundo lugar em questão de REQM. O melhor REQM foi o modelo com erros multiplicativos e tendencia aditiva, seguido de Holt e o ARIMA automático em terceiro.
+Como o score do MAN é quase o dobro do score de AAN, mas são próximos no REQM, prefere-se o AAN.
+
+```{r}
+models$arima
+```
+
+O modelo selecionado automaticamente pelo ARIMA foi o ARIMA(0,1,0) com drift, que seria o equivalente a um drift (tendencia média da série) com erro ~Normal cumulativo.
+
+```{r}
+
+cast %>% 
+  filter(.model != 'binom.neg') %>%
+  autoplot(soma) +
+  facet_wrap(~ .model) +
+  ylab('quantidade de pacientes') +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes de Imunodeficiência Primária Com Predominância De Defeitos De Anticorpos no SUS", 
+       subtitle = "a partir de 2020/06")
+```
+Pelos gráficos, observa-se que as predições dos modelos AAN e arima (ARIMA(0,1,0) w/ drift) se ajustam bem ao comportamento observado após junho de 2020. O modelo MAN pode ser descartado, pela crescente incerteza após os primeiros 12 meses.
+A análise dos gráficos sugere que tanto o AAN quanto o ARIMA(0,1,0) com drift seriam úteis na predição de números futuros de pacientes para Imunodeficiência Primária Com Predominância De Defeitos De Anticorpos.
+
+
+```{r}
+save.image('D80-83.RData')
+```

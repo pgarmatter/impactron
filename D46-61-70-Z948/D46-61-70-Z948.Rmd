@@ -1,0 +1,201 @@
+---
+title: "D46X-D61X-D70X-Z948 - Anemia Aplástica, Mielodisplasia E Neutropenias Constitucionais – Uso De Fatores Estimulantes De Crescimento De Colônias De Neutrófilos"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+pdf_document: default
+html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/D46-61-70-Z948/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("D46-61-70-Z948.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Bastantes dados, mas sem estacionariedade. Dois picos de variância, ou três se contar o início da série. 
+
+```{r}
+autoplot(soma, d1) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Ainda que a série original não seja estacionária na média, a série diferenciada é. Os picos de variância se mantém na série diferenciada.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente Filgrastim usado no tratamento, dosagem única.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois. Série estacionária na média quando diferenciada. 
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios)
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2020, para ter pelo menos 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg))))
+
+```
+
+O modelo linear simples teve o melhor AIC (1116.364) para a base de treino até maio de 2020. O segundo melhor AIC foi o do modelo ARIMA selecionado pelo método (1269.652): ARIMA(0,1,1)(2,0,0)[12]. Modelo corresponde a um ARIMA com sazonalidade mensal. O modelo proposto durante a análise das funções de autocorrelação teve um AIC próximo (1273.073) ao sazonal. As abordagens utilizando alisamento exponencial ficaram atrás do GLM com distribuição binomial negativa.
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>% 
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+?? Algo na análise da binomial negativa trouxe uma probabilidade impossível, o que impediu o cálculo do seu escore ?? 
+
+Contrário ao observado nos AICs, os modelos de alisamento exponencial tiveram melhores REQM e escores do que o LM simples. Além disso, o alisamento exponencial com erros multiplicativos teve as menores métricas de todos os modelos comparados (REQM = 95.18015, escore = 607.2689). Holt, por sua vez, teve um escore baixo (659.9628) mas um REQM (152.58197) mais alto que o ARIMA proposto no ínicio (126.74691). O ARIMA sazonal teve escore mais baixo que o proposto, mas o contrário ocorreu com o REQM.
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+A análise das métricas nos levaria a decidir por utilizar o MAN para a modelagem desta condição. De fato, observando-se os gráficos, pode-se perceber que seu intervalo preditivo é mais estreito que as alternativas, e a média estimada se aproxima melhor ao valor real, mesmo que não tenha havido crescimento no número de pacientes ao final do período de treino.
+
+Supõe-se que uma modelagem com mais dados, incluindo informações sobre o último aumento no número de pacientes, gere modelos melhores. Para tal, foram adicionados os 12 meses seguintes à análise.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2021/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")))
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  arrange(AIC) 
+```
+
+A relação entre os AICs se manteve.
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2021/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+No caso da modelagem com mais dados, o modelo de Holt teve o menor REQM (28.71395) e o segundo melhor escore (460.6574). Por outro lado, o ARIMA selecionado pelo método (ARIMA(2,0,0)(2,0,0)[12] com média) teve o pior REQM (82.12612), mas o melhor escore (364.5074)
+
+```{r}
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+```
+
+Frente à inserção dos doze meses subsequentes à primeira análise, foram obtidos modelos melhores, com exceção do ARIMA automático. O MAN manteve-se um bom candidato. Apesar de ter escore pior que o AAN para este caso, a incerteza inerente ao processo de predição de número de pacientes justificaria o uso do MAN para a predição, uma vez que se mostrou mais versátil para esta série temporal.
+
+```{r}
+save.image('D46-61-70-Z948.RData')
+```

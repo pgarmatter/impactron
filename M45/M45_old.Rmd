@@ -1,0 +1,1734 @@
+---
+title: "Análise Exploratoria Espondilite"
+output:
+  html_document:
+    fig_width: 9
+    fig_height: 6
+  pdf_document: default
+  df_print: paged
+date: '2022-05-18'
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+# library(data.table)
+library(GGally)
+library(ggdist)
+library(ggfortify)
+library(MASS)
+library(splines)
+library(patchwork)
+library(distributional)
+# library(ggridges)
+
+setwd("E:/GEATS/Estimador-AIO-SUS/M45")
+load("M45.RData")
+
+select <- dplyr::select
+
+CID = 'M45'
+```
+
+Conexão ao Postgres e definição das tabelas do banco e carregamento.
+
+```{r, eval=FALSE}
+db <- 'sabeis'
+host_db <- 'localhost'
+db_port <- '5432'
+db_user <- 'postgres'
+db_password <- 'pgres28'
+
+con <-
+  dbConnect(
+    RPostgres::Postgres(),
+    dbname = db,
+    host = host_db,
+    port = db_port,
+    user = db_user,
+    password = db_password,
+    options="-c search_path=public"
+  )
+
+# dbListTables(con)
+tb_medicamentos <- tbl(con, "tb_medicamento")
+
+
+# SIGTAPS
+tb_sigtap <- tbl(con, "td_medicamento_sigtap") %>%
+  as.data.frame() %>%
+  separate(
+    co_sigtap,
+    sep = ";",
+    into = c("co_sigtap1", "co_sigtap2", "co_sigtap3")
+  ) %>%        # separa os sigtaps de uma coluna para 3
+  pivot_longer(
+    cols = starts_with("co_sigtap"),
+    values_drop_na = T,
+    values_to = "co_sigtap"
+  ) %>%  # separa sigtaps diferentes em linhas diferentes
+  mutate(no_forma_organizacao = as.factor(trimws(no_forma_organizacao)),
+         co_sigtap = as.integer(trimws(co_sigtap))) %>%
+  filter(substr(co_sigtap, 1,1) == "6") %>%
+  select(co_sigtap, sg_procedimento, no_forma_organizacao) %>%
+  mutate(no_identificador = gsub('(.{4})\\d*.*', '\\1', sg_procedimento))
+
+# Forma organização
+tb_organizacao <- as.data.frame(
+  read.csv(
+    "../sigtap-forma-organizacao",
+    sep = ",",
+    header = F,
+    col.names = c("codigo", "org"),
+    encoding = "UTF-8"
+  )
+) %>%
+  transmute(codigo_organizacao = codigo, org = str_trim(tolower(org)))
+
+# BPS removido, mas mantido no arquivo de bkp
+
+# linhas de tratamento
+tratamentos <- as.data.frame(read.csv(
+  'linhas_tto.csv',
+  sep = ";",
+  header = T,
+  encoding = "UTF-8"
+),) %>%
+  inner_join(tb_sigtap) 
+
+```
+
+Cortes e filtros para periodos, compilação de informações adicionais.
+
+```{r, eval=FALSE}
+# Compilação de numero de drogas em uso concorrente por mes (Contado por sigla limpa AAAA não AAAA99A)
+# Contar por linha- (1a = 1, 2a = 1+2 etc)
+
+conco.aux <- tb_medicamentos %>%
+  filter(co_cidpri == CID) %>%
+  as.data.frame() %>%
+  select(nu_competencia, co_procedimento) %>%
+  rename(co_sigtap = co_procedimento) %>%
+  unique() %>% 
+  inner_join(tb_sigtap) %>%
+  inner_join(tratamentos) %>%
+  mutate(ano_mes = yearmonth(paste(nu_competencia), "%Y%m")) %>% 
+  select(ano_mes, no_identificador, linha_tto_periferica) %>% 
+  unique() %>% 
+  mutate(numero = 1)
+
+concorrentes <- conco.aux %>%
+  pivot_wider(names_from = linha_tto_periferica,
+              values_from = numero,
+              names_prefix = 'linha_tto_') %>%
+  group_by(ano_mes) %>%
+  summarise(
+    qt_conc_4 = sum(linha_tto_4, na.rm = T),
+    qt_conc_5 = qt_conc_4 + sum(linha_tto_5, na.rm = T),
+    qt_conc_7 = qt_conc_5 + sum(linha_tto_7, na.rm = T)
+  ) %>%
+  pivot_longer(
+    cols = starts_with('qt_conc'),
+    names_prefix = 'qt_conc_',
+    names_to = 'linha_tto_periferica',
+    values_to = 'qt_concorrentes',
+    names_transform =list(linha_tto_periferica = as.integer)
+  ) 
+
+rm(conco.aux)
+
+ggplot(concorrentes, aes(x=ano_mes, y=qt_concorrentes, color=as.factor(linha_tto_periferica))) +
+  geom_jitter(alpha=0.5, height=0.1)
+
+
+```
+
+## Criação dos Data Frames de análise
+
+```{r, eval=FALSE}
+# Não compilado em quantidades (cada registro é uma dispensação)
+base_espondilite <- tb_medicamentos %>%
+  filter(co_cidpri == CID) %>% 
+  as_tibble() %>% 
+  mutate(ano_mes = yearmonth(paste(nu_competencia), format="%Y%m")) %>% 
+  rename(co_sigtap = co_procedimento) %>%
+  inner_join(tb_sigtap) 
+  # select(-nu_competencia)
+```
+
+```{r}
+trat_filtered <- tratamentos %>%
+  select(via, somente_adulto, linha_tto_axial, linha_tto_periferica, doses_inducao, doses_mensais, no_identificador) %>%
+  unique()
+
+vias <- tratamentos %>% select(co_sigtap, via, no_identificador)
+ttos <- tratamentos %>% select(-via, -nome, -co_sigtap, -sg_procedimento) %>% unique()
+
+espondilite.all <- base_espondilite %>%
+  inner_join(vias) %>%
+  group_by(ano_mes, no_identificador, via) %>%
+  summarise(qt_usuarios = n_distinct(nu_cnspcn)) %>% # sumariza por data/sigtap -> numero de usuarios
+  inner_join(ttos) %>%
+  inner_join(concorrentes) %>%
+  select(
+    ano_mes,
+    no_identificador,
+    qt_usuarios,
+    no_forma_organizacao,
+    via,
+    somente_adulto,
+    linha_tto_axial,
+    doses_inducao,
+    doses_mensais,
+    linha_tto_periferica,
+    qt_concorrentes,
+    # media_preco
+  ) %>%
+  mutate(no_forma_organizacao = droplevels(no_forma_organizacao)) %>%
+  ungroup() %>% # desagrupa para filtrar
+  filter(ano_mes < max(ano_mes)) %>% # filtra ultimo mes (potencial subdimensionamento)
+  tsibble(index = ano_mes, key = c(no_identificador, via))
+
+
+# Base de análise (usuarios/mes*sigtap)
+espondilite.60 <- espondilite.all %>%
+  filter(meses_totais <= 60)
+
+# Contagem de total de usuários CEAF1A por mes.
+# espondilite.soma <- espondilite.all %>%
+#   index_by(ano_mes) %>%
+#   summarise(qt_usuarios = sum(qt_usuarios))
+
+espondilite.soma <- base_espondilite %>%
+  inner_join(vias) %>% # filtra ceaf1a
+  group_by(ano_mes) %>%
+  summarise(qt_total_usuarios = n_distinct(nu_cnspcn)) %>% 
+  filter(ano_mes < max(ano_mes)) %>%
+  tsibble(index = ano_mes)
+
+# Parcela de usuarios
+espondilite.pct <- espondilite.all %>%
+  inner_join(espondilite.soma) %>%
+  mutate(pct_usuarios = qt_usuarios / qt_total_usuarios * 100)
+
+```
+
+## Análise exploratória por quantidade de usuários
+
+```{r}
+
+espondilite.soma %>% 
+  autoplot(qt_total_usuarios) +
+  ggtitle("Pacientes mensais de Espondilite Ancilosante", subtitle = "Tratados com medicamentos CEAF 1A")
+
+```
+
+Média e variância das quantidades de usuários mensais:
+
+```{r}
+mean(espondilite.soma$qt_total_usuarios)
+var(espondilite.soma$qt_total_usuarios)
+
+mean(espondilite$qt_usuarios)
+var(espondilite$qt_usuarios)
+```
+
+Comportamentos de quantidade de usuários segregados por medicamento e via
+
+```{r}
+# Numero de usuarios por medicamento por meses_totais, forma e via
+ggplot(espondilite, aes(x=meses_totais, y=qt_usuarios, color=no_identificador, shape=no_identificador)) +
+  geom_line() +
+  scale_shape_manual(values=1:nlevels(as.factor(espondilite$no_identificador))) +
+  facet_wrap(~ as.factor(no_forma_organizacao) + via) +
+  labs(title = "Quantidade de pacientes por medicamento", subtitle = "Primeiros 60 meses desde a primeira dispensação")
+
+```
+
+Só há um medicamento em cada forma de organização (e consequentemente, para espondilite, linha de tratamento) que não inibidores de TNF-a.
+
+```{r, contagem linhas}
+espondilite.60 %>%
+  count(linha_tto_axial, linha_tto_periferica)
+```
+
+Alguns medicamentos e formas não tinham atingido cinco anos de uso até o final dos dados disponiveis no momento da extração.
+
+```{r pares, warning=FALSE}
+# Pares
+ggpairs(espondilite.60,
+        columns = c("meses_totais",
+                    "qt_usuarios",
+                    "linha_tto_axial",
+                    "linha_tto_periferica",
+                    "no_forma_organizacao",
+                    "qt_concorrentes",
+                    "somente_adulto",
+                    "via",
+                    "media_preco"),
+        aes(color=no_identificador, alpha=0.5),
+        na.rm=TRUE) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+
+```
+
+Quantidade de usuários por preço, meses desde a incorporação, e concorrentes. Observe que qt_concorrentes corresponde ao número de drogas disponíveis para a mesma linha de tratamento que a droga referida em um certo momento. Como os dados foram filtrados pelos primeiros 60 meses de uso, não representam o mesmo período para todas as drogas.
+
+```{r}
+
+# preço meses e concorrentes. Importante lembrar q qt_concorrentes é por linha_tto
+espondilite.60 %>% gather(c(media_preco, meses_totais, qt_concorrentes),
+                       key = "var",
+                       value = "valor") %>%
+  ggplot(aes(x = valor, y = qt_usuarios, color = no_identificador)) +
+  geom_jitter(width=.25, alpha=0.5) +
+  facet_wrap( ~ var, scales = "free")
+```
+
+
+```{r}
+# linhas de tratamento periferica e axial são reduntantes. Usar linha_tto_periferica, pois é numérica e representa as outras tbm. Ou no_forma_organizacao
+tratamentos %>%
+  mutate(linha_tto_axial = replace_na(linha_tto_axial,-1)) %>%
+  xtabs(formula = ~ linha_tto_periferica + linha_tto_axial)
+```
+
+
+## Análise Exploratória PCT_USUARIOS
+
+Crescimento de pacientes por medicamento e total.
+
+```{r numero de pacientes total dividido em medicamentos}
+espondilite.all %>%
+  ggplot(aes(x=ano_mes, y=qt_usuarios, fill=paste(no_identificador, via))) +
+  geom_area(size=.3, colour="black") +
+  ggtitle("Pacientes mensais de Espondilite Ancilosante", subtitle = "Tratados com medicamentos CEAF 1A")
+
+```
+
+Parcela de usuários (totais) por droga e por forma de organização.
+
+```{r parcela de pacientes por droga}
+ggplot(espondilite.pct, aes(x=ano_mes, y=pct_usuarios, fill=paste(no_identificador, via))) +
+  geom_area(size=.5, colour="black")
+
+# ggplot(espondilite.pct, aes(x=ano_mes, y=pct_usuarios, fill=paste(no_identificador, via))) +
+#   geom_area(size=.5, colour="black") +
+#   facet_wrap(~no_forma_organizacao)
+```
+
+```{r % por qt_concorrentes}
+espondilite.pct %>%
+  ggplot(aes(x = qt_concorrentes, y = pct_usuarios, color = no_identificador)) +
+  geom_jitter(width=.25, alpha=0.5)
+```
+# Modelando numeros de pacientes
+
+Definindo os eventos de incorporação como eventos de intervenção. Como a tendência pode mudar a cada incorporação, a data da primeira dispensação é usada como um evento para cada droga nova.
+
+```{r eventos de incorporacao}
+
+eventos_incorporacao <- espondilite.all %>% 
+  as_tibble() %>% 
+  group_by(no_identificador, via) %>% 
+  summarise(dt_incorporacao = min(ano_mes)) %>% 
+  ungroup() %>% 
+  filter(dt_incorporacao > min(dt_incorporacao)) %>% 
+  arrange(dt_incorporacao) %>% 
+  select(dt_incorporacao) %>% 
+  as.list() 
+
+eventos_incorporacao <- eventos_incorporacao[['dt_incorporacao']]
+
+```
+
+Comparação caracteristicas de medicamentos
+
+```{r comparacao de caracteristicas de medicamentos linha_tto x doses_mensais}
+ttos %>% ggplot(aes(
+  x = doses_mensais,
+  y = as.factor(linha_tto_periferica),
+  color = no_identificador,
+  shape = as.factor(somente_adulto)
+)) + geom_point(position = position_dodge2(width = .2))
+```
+
+## Modelagem da demanda aferida
+
+Tentamos desenvolver um modelo para demanda aferida e um para cada medicamento tomando como base os dados até o mês que antecede a primeira dispensação da última incorporação (SECU).
+
+```{r modelagem demanda aferida}
+espondilite.all <- espondilite.all %>% 
+  inner_join(espondilite.soma) %>% 
+  mutate(log_usuarios = log(qt_usuarios),
+         diff1 = c(NA, diff(qt_usuarios)),
+         diff_log = log(diff1),
+         pandemia = time_in(ano_mes, "2020-03" ~ .))
+
+# esse é por droga, como faz o cpgram?
+# ggcpgram(espondilite.all$qt_usuarios)
+
+ggcpgram(espondilite.soma$qt_total_usuarios)
+
+espondilite.soma %>% 
+  gg_tsdisplay(qt_total_usuarios, plot_type = "partial")
+
+```
+
+acf decai, pacf spike em lag 1, nada após. Não estacionario, variância muda no final mas durante os primeiros anos parece constante. Aparenta ser um processo AR(1).
+
+```{r modelagem demanda aferida}
+espondilite.soma %>% 
+  gg_tsdisplay(c(0, diff(qt_total_usuarios)), plot_type = "partial")
+
+```
+
+A série diferenciada não tem variância constante, apesar de ser estacionária na média. ACF e PACF diferentes da série original, ambas com picos em lags 1 e 13, ACF também em 10, 13 e 14. Ao modelar ARIMA, avalio ACF e PACF da serie original mesmo que ela não seja estacionaria?
+
+```{r modelagem demanda aferida}
+# ajustar o modelo com dados até a última incorporação
+espondilite.2019 <- espondilite.all %>% 
+  filter(ano_mes <= eventos_incorporacao[4])
+
+# quais eventos?
+eventos_incorporacao
+
+soma.treino <- espondilite.soma %>% 
+  filter(ano_mes <= eventos_incorporacao[4])
+
+# modelo para o total de pacientes de M45
+soma.models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ pdq(1,1,0)),
+        B = ARIMA(qt_total_usuarios ~ trend(eventos_incorporacao[1:3])),
+        C = ARIMA(qt_total_usuarios ~ trend()),
+        D = ARIMA(qt_total_usuarios),
+        E = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        F = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        G = ETS(qt_total_usuarios ~ error("M") + trend("Ad") + season("N")))
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+
+# avaliando com concorrentes dá muito erro: não muda muito ao decorrer do tempo, muda ao mesmo tempo que os nós do trend (eventos de incorporação), constante para ultima droga presente no .all.
+        # concorrentes = ARIMA(qt_usuarios ~ qt_concorrentes),
+        # concorr_arima_errors = ARIMA(qt_usuarios ~ qt_concorrentes + trend(eventos_incorporacao)))
+
+glance(soma.models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('H'), AIC = c(AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+
+```
+
+Verificando a soma (demanda aferida)
+Arima errors foi o mais bem avaliado para o AIC, contudo, o melhor ajuste parece ter sido o arima110, que conteve os dados observados por quase 24 meses.
+
+```{r}
+newdata <- soma %>% filter(ano_mes > eventos_incorporacao[4])
+soma.futuro.12 <- espondilite.soma %>% filter(ano_mes > eventos_incorporacao[4], ano_mes <= eventos_incorporacao[4] + 12)
+soma.futuro.24 <- espondilite.soma %>% filter(ano_mes > eventos_incorporacao[4], ano_mes <= eventos_incorporacao[4] + 24)
+soma.futuro.60 <- espondilite.soma %>% filter(ano_mes > eventos_incorporacao[4], ano_mes <= eventos_incorporacao[4] + 60)
+```
+
+Análise de AIC, REQM e Winkler para os modelos
+```{r, Análise de AIC, RMSE e Winkler para os modelos}
+soma.cast <- models %>% forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(nb.cast) #var da serie
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'H',
+                ano_mes = unique(soma.cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+soma.cast <- soma.cast %>%
+  bind_rows(nb.cast)
+
+soma.cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('H'), 
+                       AIC = c(AIC(binomialneg)))) %>% 
+  left_join(soma.cast %>% accuracy(soma, 
+                               list(REQM = RMSE,
+                               winkler = winkler_score), level = 95)) %>% 
+  select(.model, AIC, REQM, winkler) %>% 
+  arrange(.model)
+
+```
+
+
+```{r, Análise de AIC, RMSE e Winkler para os modelos}
+soma.aics <- glance(espondilite.soma.model) %>% select(.model, AIC)
+
+soma.reqm.12 <- espondilite.soma.model %>% 
+  forecast(new_data = soma.futuro.12) %>% 
+  accuracy(soma.futuro.12,
+           list(REQM.12 = RMSE,
+                winkler.12 = winkler_score), level = 95) %>% 
+  arrange(winkler.12) %>% 
+  select(.model, REQM.12, winkler.12)
+
+soma.reqm.24 <- espondilite.soma.model %>% 
+  forecast(new_data = soma.futuro.24) %>% 
+  accuracy(soma.futuro.24,
+           list(REQM.24 = RMSE,
+                winkler.24 = winkler_score), level = 95) %>% 
+  arrange(winkler.24) %>% 
+  select(.model, REQM.24, winkler.24)
+
+soma.reqm.60 <- espondilite.soma.model %>% 
+  forecast(new_data = soma.futuro.60) %>% 
+  accuracy(soma.futuro.60,
+           list(REQM.60 = RMSE,
+                winkler.60 = winkler_score), level = 95) %>% 
+  arrange(winkler.60) %>% 
+  select(.model, REQM.60, winkler.60)
+```
+
+```{r resumo dos RMSEs para soma}
+soma.aics %>% 
+  inner_join(soma.reqm.12) %>% 
+  inner_join(soma.reqm.24) %>% 
+  inner_join(soma.reqm.60) %>% 
+  mutate(across(2:8, round, 2)) %>% 
+  arrange(AIC) %>% knitr::kable()
+```
+
+
+```{r}
+
+soma.cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free", nrow = 2) +
+  scale_x_yearmonth(date_breaks = if(dim(soma)[1] > 60)'4 years' else '1 year', date_labels='%Y') +
+  labs(title = paste0("Estimativas de número de pacientes com ", nome, " no SUS"), 
+       subtitle = paste0("a partir de ", datacorte)) +
+  ylab("quantidade de pacientes") + 
+  xlab("ano")
+
+
+
+soma.cast <- espondilite.soma.model %>% 
+  forecast(h = 60)
+
+
+
+autoplot(soma.cast, espondilite.soma) + 
+  # geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") +
+  facet_wrap(~ .model)
+
+```
+
+Até dois anos os dados observados estão contidos nos estimados para arima110.
+
+```{r grafico de demanda aferida, eval=F}
+autoplot(soma.cast %>% filter(.model == "arima_110"), espondilite.soma) + 
+  # geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  labs(title = "Intervalo de predição para demanda aferida (M45)", 
+       subtitle = "para 12, 24 e 60 meses, modelado com base em dados até 01/2019",
+       y = "número de pacientes tratados com CEAF1a",
+       x = "ano mês")
+```
+
+
+```{r}
+espondilite.soma.model %>% 
+  select(A) %>% 
+  gg_tsresiduals()
+
+espondilite.soma.model %>% 
+  select(arima_110) %>% 
+  augment() %>% 
+  features(.resid, ljung_box, lag=2) # lag = dof? quando usar dof e quando usar lag?
+
+# Se tudo estiver correto, o ruído pode ser considerado ruido branco.
+
+espondilite.soma.model %>% 
+  select(arima_110) %>% 
+  augment() %>% 
+  as_tibble() %>% 
+  select(.resid) %>% 
+  ts() %>% 
+  ggcpgram()
+
+# Periodograma acumulado corrobora com a conclusão de WN
+```
+
+Modelo ARIMA(1,1,0) de demanda aferida parece ter bom ajuste, capacidade preditiva até 2 anos e resíduos ~N(0,sigma^2).
+
+## Modelando todos medicamentos e verificando ADAL
+
+```{r periodograma por medicamento}
+
+droga = unique(tratamentos$no_identificador)
+n.droga = n.droga = c("Adalimumabe", "Certolizumabe pegol", "Etanercepte", "Golimumabe", "Infliximabe", "Metotrexato", "Secuquinumabe")
+  
+i = 1
+cp.adal = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i]))$qt_usuarios) + labs(title = n.droga[i])
+i = i+1
+cp.cert = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i]))$qt_usuarios) + labs(title = n.droga[i])
+i = i+1
+cp.etan = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i]))$qt_usuarios) + labs(title = n.droga[i])
+i = i+1
+cp.goli = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i]))$qt_usuarios) + labs(title = n.droga[i])
+i = i+1
+cp.infl = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i]))$qt_usuarios) + labs(title = n.droga[i])
+i = i+1
+cp.meto.o = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i] & via == "oral"))$qt_usuarios) + labs(title = paste(n.droga[i], "oral"))
+cp.meto.i = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i] & via == "injetavel"))$qt_usuarios) + labs(title = paste(n.droga[i], "injetável"))
+i = i+1
+cp.secu = ggcpgram((espondilite.all %>% filter(no_identificador == droga[i]))$qt_usuarios) + labs(title = n.droga[i])
+i = i+1
+
+(cp.adal + cp.cert) / (cp.etan + cp.goli) / (cp.meto.o + cp.meto.i) / cp.infl
+
+```
+
+
+```{r FAC e FACP medicamentos}
+i = 1
+cp.adal = espondilite.all %>% filter(no_identificador == droga[i]) %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i]) %>% PACF(qt_usuarios) %>% autoplot() + labs(title = n.droga[i])
+i = i+1
+cp.cert = espondilite.all %>% filter(no_identificador == droga[i]) %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i]) %>% PACF(qt_usuarios) %>% autoplot() + labs(title = n.droga[i])
+i = i+1
+cp.etan = espondilite.all %>% filter(no_identificador == droga[i]) %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i]) %>% PACF(qt_usuarios) %>% autoplot() + labs(title = n.droga[i])
+i = i+1
+cp.goli = espondilite.all %>% filter(no_identificador == droga[i]) %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i]) %>% PACF(qt_usuarios) %>% autoplot() + labs(title = n.droga[i])
+i = i+1
+cp.infl = espondilite.all %>% filter(no_identificador == droga[i]) %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i]) %>% PACF(qt_usuarios) %>% autoplot() + labs(title = n.droga[i])
+i = i+1
+cp.meto.o = espondilite.all %>% filter(no_identificador == droga[i] & via == "oral") %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i] & via == "oral") %>% PACF(qt_usuarios) %>% autoplot() + labs(title = paste(n.droga[i], "oral"))
+cp.meto.i = espondilite.all %>% filter(no_identificador == droga[i] & via == "injetavel") %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i] & via == "injetavel") %>% PACF(qt_usuarios) %>% autoplot() + labs(title = paste(n.droga[i], "injetável"))
+i = i+1
+cp.secu = espondilite.all %>% filter(no_identificador == droga[i]) %>% ACF(qt_usuarios) %>% autoplot() + 
+  espondilite.all %>% filter(no_identificador == droga[i]) %>% PACF(qt_usuarios) %>% autoplot() + labs(title = n.droga[i])
+i = i+1
+
+cp.adal/cp.cert/cp.etan/cp.goli
+cp.meto.o/cp.meto.i/cp.infl/cp.secu
+```
+
+
+```{r modelagem por medicamento começando por ADAL}
+espondilite.all %>% 
+  filter(no_identificador == "ADAL") %>% 
+  gg_tsdisplay(qt_usuarios, plot_type = "partial")
+```
+
+Evidências de ser uma AR(1), baseado na análise da FAC e FACP.
+Modelo gerado para todos os medicamentos com base neste. Em seguida foi verificado um a um se tinham comportamento como AR(1) também.
+
+```{r modelagem por medicamento começando por ADAL}
+
+#fazendo ajuste com arima errors (trend shift em cada incorporação) arima_errors_ultima (somente ultima incorporação faz um trend shift) e stepwise. (TODAS AS DROGAS)
+espondilite.model <- espondilite.2019 %>% filter(no_identificador %in% c("ADAL", "ETAN", "GOLI", "INFL", "METO")) %>% 
+  model(A = ARIMA(qt_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_usuarios),
+        C = ARIMA(qt_usuarios ~ qt_total_usuarios + pdq()),
+        D = ARIMA(qt_usuarios ~ trend(knots=eventos_incorporacao[1:3]) + pdq()),
+        E = ETS(qt_usuarios ~ error("A") + trend("A") + season("N")),
+        F = ETS(qt_usuarios ~ error("M") + trend("A") + season("N")),
+        G = TSLM(qt_usuarios ~ ano_mes))
+
+binomialneg <- glm.nb(qt_usuarios ~ ano_mes + no_identificador + via + linha_tto_periferica + somente_adulto + doses_inducao + doses_mensais + qt_concorrentes , espondilite.2019 %>% filter(no_identificador %in% c("ADAL", "ETAN", "GOLI", "INFL", "METO")))
+
+glance(espondilite.model) %>% 
+  select(no_identificador, via, .model, AIC) %>% 
+  bind_rows(data.frame(.model = c('H'), AIC = c(AIC(binomialneg)))) 
+
+```
+
+```{r cast de medicamentos}
+newdata <- espondilite.all %>% 
+  filter(ano_mes > eventos_incorporacao[4]) %>% 
+  filter(no_identificador %in% c("ADAL", "ETAN", "GOLI", "INFL", "METO")) %>% 
+  select(ano_mes, no_identificador, via, linha_tto_periferica, somente_adulto, doses_inducao, doses_mensais, qt_concorrentes, qt_total_usuarios)
+
+cast <- espondilite.model %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(nb.cast) #var de cada serie?
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(no_identificador=newdata$no_identificador,
+                via = newdata$via,
+                .model = 'H',
+                ano_mes = newdata$ano_mes,
+                qt_usuarios = dist_negative_binomial(size, prob),
+                .mean = nb.cast,
+                linha_tto_periferica = newdata$linha_tto_periferica,
+                somente_adulto = newdata$somente_adulto,
+                doses_inducao = newdata$doses_inducao,
+                doses_mensais = newdata$doses_mensais,
+                qt_concorrentes = newdata$qt_concorrentes,
+                qt_total_usuarios = newdata$qt_total_usuarios,
+                index = ano_mes,
+                key = c(no_identificador, via, .model),
+                response = 'qt_usuarios',
+                distribution = 'qt_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  filter(no_identificador == 'ADAL') %>% 
+  accuracy(espondilite.all,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+
+glance(espondilite.model) %>% 
+  select(no_identificador, via, .model, AIC) %>% 
+  bind_rows(data.frame(.model = c('H'), 
+                       AIC = c(AIC(binomialneg)))) %>% 
+  left_join(cast %>% accuracy(espondilite.all, 
+                               list(REQM = RMSE,
+                               winkler = winkler_score), level = 95)) %>% 
+  select(no_identificador, via, .model, AIC, REQM, winkler) %>% 
+  arrange(no_identificador, via, .model) 
+
+```
+
+```{r gráficos dos modelos}
+
+# alterar filtro e title manualmente
+cast %>% 
+  filter(no_identificador == "ADAL" & via == "injetavel") %>% 
+  autoplot(espondilite.all) +
+  facet_wrap(~ .model, scales = "free", nrow = 2) +
+  scale_x_yearmonth(date_breaks = if(dim(soma)[1] > 60)'4 years' else '1 year', date_labels='%Y') +
+  labs(title = paste0("Estimativas de número de pacientes de espondilite ancilosante tratados com adalimumabe no SUS"), 
+       subtitle = paste0("a partir de ", datacorte)) +
+  ylab("quantidade de pacientes") + 
+  xlab("ano")
+```
+
+## DECOMP + MODELAGEM
+
+```{r}
+dcmp <- espondilite.all %>% 
+  # filter(no_identificador == 'ETAN') %>% 
+  model(dcmp = STL(qt_usuarios)) %>% 
+  components() %>% 
+  group_by(no_identificador, via) %>% 
+  mutate(d1 = difference(trend)) 
+
+m.dcmp <- espondilite.all %>% 
+  # filter(no_identificador == 'ETAN') %>% 
+  left_join(dcmp)
+
+m1 <- lm(d1 ~ qt_concorrentes +
+           ano_mes + 
+           (via + 
+           linha_tto_periferica + 
+           somente_adulto + 
+           no_forma_organizacao + 
+           doses_inducao + 
+           doses_mensais) * ano_mes * qt_concorrentes * qt_total_usuarios
+         ,data = m.dcmp)
+
+m.dcmp$cast1 <- predict(m1, newdata = m.dcmp)
+
+ggplot(m.dcmp, aes(x = ano_mes, y = d1)) +
+  geom_line() + 
+  geom_line(aes(x = ano_mes, y = cast1), colour = 'red') +
+  geom_line(aes(x = ano_mes, y = qt_concorrentes * 10), colour = 'blue') +
+  facet_wrap(~ no_identificador + via, scales = "free")
+
+plot(m1)
+
+summary(m1)
+```
+
+```{r}
+c1 = predict(m1, newdata = m.dcmp %>% filter(no_identificador == "SECU"))
+ggplot(m.dcmp %>% filter(no_identificador == "SECU"), aes(x = ano_mes, y = c1)) + 
+         geom_line()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+CERT não tem modelos bons, pois foi incorporado ao final da série (2018). Para adalimumabe, o menor AIC foi o do modelo ML com erros ARIMA. 
+
+```{r modelagem por medicamento começando por ADAL}
+espondilite.model %>% 
+  filter(no_identificador == "ADAL") %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "ADAL") %>% 
+  select(arima110) %>% 
+  gg_tsresiduals()
+```
+
+Os resíduos não apresentam evidência de que o modelo falhou em absorver algum componente sistemático da série. Parecem ser estacionários na média zero e distribuídos normalmente, sem correlação significativa. Houve uma maior dispersão ao final da série, onde os próprios valores observados também têm maior dispersão e pode ter relação com a pandemia.
+
+Para a simulação de dados futuros, a fim de alimentar o modelo com erros ARIMA, foi usado o último valor de qt_total_usuarios, o que pode não refletir a realidade. Em um cenário real de estimativa, seria necessário assumir uma estimativa de demanda aferida para utilizar na variável explicativa.
+
+```{r criacao de bases de validação}
+soma.cast <- espondilite.soma.model %>% 
+  select(arima_110) %>% 
+  forecast(h = 60) %>% 
+  as_tibble() %>% 
+  select(ano_mes, .mean) %>% 
+  rename(qt_total_usuarios = .mean)
+
+espondilite.futuro.12 <- espondilite.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes <= eventos_incorporacao[4] + 12) %>% 
+  select(-qt_total_usuarios) %>% 
+  as_tibble() %>% 
+  inner_join(soma.cast, by = "ano_mes")
+
+espondilite.futuro.24 <- espondilite.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes <= eventos_incorporacao[4] + 24) %>% 
+  select(-qt_total_usuarios) %>% 
+  as_tibble() %>% 
+  inner_join(soma.cast, by = "ano_mes")
+
+espondilite.futuro.60 <- espondilite.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes <= eventos_incorporacao[4] + 60) %>% 
+  select(-qt_total_usuarios) %>% 
+  as_tibble() %>% 
+  inner_join(soma.cast, by = "ano_mes")
+```
+
+
+```{r modelagem por medicamento começando por ADAL}
+adal.all <- espondilite.all %>% 
+  filter(no_identificador == "ADAL")
+
+adal.futuro <- espondilite.futuro.60 %>% filter(no_identificador == "ADAL")
+  # adal.all %>% 
+  # filter(ano_mes >= eventos_incorporacao[4]) %>% 
+  # right_join(new_data(adal.all %>% filter(ano_mes < eventos_incorporacao[4]), n=60), by = c("ano_mes", "no_identificador", "via")) %>% 
+  # fill(qt_total_usuarios)
+  
+
+adal.cast <- espondilite.model %>% 
+  filter(no_identificador == "ADAL") %>% 
+  forecast(new_data = adal.futuro)
+
+autoplot(adal.cast, adal.all) +
+  geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  facet_wrap(~.model) +
+  theme(legend.position = "none")
+
+```
+
+O modelo gerado automaticamente obteve AIC e BIC menores que o modelo com erros ARIMA. O mesmo ocorreu com ARIMA(1,1,0). Ambos tiveram uma boa capacidade preditiva para os intervalor de 12 e 24 meses, parecendo se distanciar do observado somente ao final do terceiro ano, onde não há mais dados para comparação.
+
+Verificando ETAN
+
+```{r modelagem etan}
+etan.all <- espondilite.all %>% 
+  filter(no_identificador == "ETAN")
+
+etan.all %>% 
+  gg_tsdisplay(qt_usuarios, plot_type = "partial")
+```
+
+Etanercepte teve um comportamento diferente das outras drogas, em especial a partir das últimas incorporações. Ainda assim, a FAC e FACP indicam um processo AR(1)
+
+```{r}
+par(mfrow = c(2,2))
+plot.ts(diff(etan.all$qt_usuarios))
+plot.ts(diff(etan.all$qt_usuarios, differences = 2))
+plot.ts(diff(etan.all$qt_usuarios, differences = 3))
+plot.ts(diff(etan.all$qt_usuarios, differences = 4))
+
+lambda <- etan.all %>% 
+  features(c(0,diff(qt_usuarios)), features = guerrero) %>% 
+  pull(lambda_guerrero)
+
+etan.all %>% 
+  autoplot(box_cox(c(0,diff(qt_usuarios)), lambda))
+```
+
+Uma transformação Box Cox não resolve o problema de variância ao final da série diferenciada, tampouco a diferenciação da série.
+
+```{r modelagem etan}
+etan.futuro <- espondilite.futuro.60 %>% filter(no_identificador == "ETAN")
+  # etan.all %>% 
+  # filter(ano_mes >= eventos_incorporacao[4]) %>% 
+  # right_join(new_data(etan.all %>% filter(ano_mes < eventos_incorporacao[4]), n=60), by = c("ano_mes", "no_identificador", "via")) %>% 
+  # fill(qt_total_usuarios)
+
+espondilite.model %>% 
+  filter(no_identificador == "ETAN") %>% 
+  glance()
+
+espondilite.model %>% 
+  filter(no_identificador == "ETAN")
+```
+
+Com relação a AIC, o modelo com erros ARIMA foi o mais baixo, mas nenhum obteve uma predição acurada. Os modelos automático e ARIMA(1,1,0) foram estimados com componente sazonal para 12 meses.
+
+```{r modelagem etan}
+espondilite.model %>% 
+  filter(no_identificador == "ETAN") %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "ETAN") %>% 
+  select(arima110) %>% 
+  gg_tsresiduals()
+
+etan.cast <- espondilite.model %>% 
+  filter(no_identificador == "ETAN") %>% 
+  forecast(new_data = etan.futuro)
+
+autoplot(etan.cast, etan.all) +
+  geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  facet_wrap(~.model) +
+  theme(legend.position = "none")
+
+```
+
+Apesar da normalidade dos resíduos e bom ajuste aos dados constantes na base de treino, nenhum dos modelos foi capaz de predizer a alteração na tendência da difusão do etanercepte. O que mais se aproximou de conter os dados reais foi o modelo selecionado automaticamente.
+
+Verificando INFL
+
+```{r modelagem infliximabe}
+infl.all <- espondilite.all %>% 
+  filter(no_identificador == "INFL")
+
+infl.all %>% 
+  gg_tsdisplay(qt_usuarios, plot_type = "partial")
+```
+
+A análise da FAC e FACP indica um processo AR(1), como para as drogas anteriores.
+
+```{r modelagem infliximabe}
+espondilite.model %>% 
+  filter(no_identificador == "INFL") %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "INFL") %>% 
+  select(arima110) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "INFL") %>% 
+  glance()
+```
+
+ARIMA(1,1,0) apresenta menor dispersão dos resíduos que erros ARIMA. O menor AIC foi o do modelo com erros ARIMA, mas este teve a pior predição, quando comparado aos dados observados após janeiro de 2019.
+
+```{r modelagem infliximabe}
+infl.futuro <- infl.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4]) %>% 
+  right_join(new_data(infl.all %>% filter(ano_mes < eventos_incorporacao[4]), n=60), by = c("ano_mes", "no_identificador", "via")) %>% 
+  fill(qt_total_usuarios)
+
+infl.cast <- espondilite.model %>% 
+  filter(no_identificador == "INFL") %>% 
+  forecast(new_data = infl.futuro)
+
+autoplot(infl.cast , infl.all) +
+  geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  facet_wrap(~.model) +
+  theme(legend.position = "none")
+
+```
+
+Para infliximabe, os modelos ARIMA fizeram predições que continham os dados observados nos primeiros 12 meses, desviando um pouco do real depois do periodo, mas continuou a manter a curva dentro do intervalo de 80%.
+
+Verificando METO oral
+
+```{r modelando meto oral}
+meto.oral.all <- espondilite.all %>% 
+  filter(no_identificador == "METO", via == "oral")
+
+meto.oral.all %>% 
+  gg_tsdisplay(qt_usuarios, plot_type = "partial")
+```
+
+Como com os medicamentos anteriores, indica AR(1).
+
+```{r modelando meto oral}
+espondilite.model %>% 
+  filter(no_identificador == "METO", via == "oral") %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "METO", via == "oral") %>% 
+  select(arima110) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "METO", via == "oral") %>% 
+  glance
+```
+
+Novamente os resíduos tem distribuição normal e não apresentam autocorrelação. Quanto a AICs, erros arima foi o mais baixo, enquanto ARIMA(1,1,0) foi o mais alto.
+
+```{r modelando meto oral}
+meto.oral.futuro <- meto.oral.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4]) %>% 
+  right_join(new_data(meto.oral.all %>% filter(ano_mes < eventos_incorporacao[4]), n=60), by = c("ano_mes", "no_identificador", "via")) %>% 
+  fill(qt_total_usuarios)
+
+meto.oral.cast <- espondilite.model %>% 
+  filter(no_identificador == "METO", via == "oral") %>% 
+  forecast(new_data = meto.oral.futuro)
+
+autoplot(meto.oral.cast, meto.oral.all, alpha= 0.7) +
+  geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  facet_wrap(~.model) +
+  theme(legend.position = "none")
+
+```
+
+No caso de metotrexato via oral, o modelo que teve a melhor predição para o periodo observado foi o erros ARIMA, que também obteve o menor AIC. As predições foram aceitáveis até o final do periodo conhecido.
+
+Verificando METO injetaval
+
+```{r modelando meto injetavel}
+meto.injetavel.all <- espondilite.all %>% 
+  filter(no_identificador == "METO", via == "injetavel")
+
+meto.injetavel.all %>% 
+  gg_tsdisplay(qt_usuarios, plot_type = "partial")
+```
+
+Como com os medicamentos anteriores, indica AR(1).
+
+```{r modelando meto injetavel}
+espondilite.model %>% 
+  filter(no_identificador == "METO", via == "injetavel") %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "METO", via == "injetavel") %>% 
+  select(arima110) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "METO", via == "injetavel") %>% 
+  glance
+```
+
+Novamente os resíduos tem distribuição normal e não apresentam autocorrelação. Quanto a AICs, erros arima foi o mais baixo, enquanto ARIMA(1,1,0) foi o mais alto.
+
+```{r modelando meto injetavel}
+meto.injetavel.futuro <- meto.injetavel.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4]) %>% 
+  right_join(new_data(meto.injetavel.all %>% filter(ano_mes < eventos_incorporacao[4]), n=60), by = c("ano_mes", "no_identificador", "via")) %>% 
+  fill(qt_total_usuarios)
+
+meto.injetavel.cast <- espondilite.model %>% 
+  filter(no_identificador == "METO", via == "injetavel") %>% 
+  forecast(new_data = meto.injetavel.futuro)
+
+autoplot(meto.injetavel.cast, meto.injetavel.all, alpha= 0.7) +
+  geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  facet_wrap(~.model) +
+  theme(legend.position = "none")
+
+```
+
+No caso de metotrexato via injetável, ambos modelos ARIMA predisseram intervalos que realmente continham os valores observados para os 60 meses seguintes. O modelo com erros arima teve um intervalo menor contendo os dados observados nos 24 primeiros meses, mas errou um periodo em que houve uma oscilação maior nos números.
+
+
+Verificando GOLI 
+
+```{r modelando goli}
+goli.all <- espondilite.all %>% 
+  filter(no_identificador == "GOLI")
+
+goli.all %>% 
+  gg_tsdisplay(qt_usuarios, plot_type = "partial")
+```
+
+Como com os medicamentos anteriores, indica AR(1).
+
+```{r modelando goli}
+espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  select(stepwise) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  glance
+```
+
+Novamente os resíduos tem distribuição normal e não apresentam autocorrelação. Quanto a AICs, erros arima foi o mais alto, o melhor foi o modelo selecionado automaticamente.
+
+```{r modelando goli}
+goli.futuro <- goli.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4]) %>% 
+  right_join(new_data(goli.all %>% filter(ano_mes < eventos_incorporacao[4]), n=60), by = c("ano_mes", "no_identificador", "via")) %>% 
+  fill(qt_total_usuarios)
+
+goli.cast <- espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  forecast(new_data = goli.futuro)
+
+autoplot(goli.cast, goli.all, alpha= 0.7) +
+  geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  facet_wrap(~.model) +
+  theme(legend.position = "none")
+
+```
+
+Para golimumabe, os três modelos tiveram uma boa predição até 24 meses, desviando dos dados observados após o periodo.
+
+Verificando CERT 
+
+```{r modelando cert}
+cert.all <- espondilite.all %>% 
+  filter(no_identificador == "CERT")
+
+cert.all %>% 
+  gg_tsdisplay(qt_usuarios, plot_type = "partial")
+```
+
+Como com os medicamentos anteriores, indica AR(1). Contudo, só há duas observações que atecedem a última incorporação.
+
+```{r modelando cert}
+espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  select(stepwise) %>% 
+  gg_tsresiduals()
+
+espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  glance
+```
+
+Novamente os resíduos tem distribuição normal e não apresentam autocorrelação. Quanto a AICs, erros arima foi o mais alto, o melhor foi o modelo selecionado automaticamente.
+
+```{r modelando cert}
+goli.futuro <- goli.all %>% 
+  filter(ano_mes >= eventos_incorporacao[4]) %>% 
+  right_join(new_data(goli.all %>% filter(ano_mes < eventos_incorporacao[4]), n=60), by = c("ano_mes", "no_identificador", "via")) %>% 
+  fill(qt_total_usuarios)
+
+goli.cast <- espondilite.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  forecast(new_data = goli.futuro)
+
+autoplot(goli.cast, goli.all, alpha= 0.7) +
+  geom_vline(xintercept = as.Date(eventos_incorporacao), color = "blue") + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4]+c(12,24,60)), color = "red") +
+  facet_wrap(~.model) +
+  theme(legend.position = "none")
+
+```
+
+Para golimumabe, os três modelos tiveram uma boa predição até 24 meses, desviando dos dados observados após o periodo.
+
+
+
+# Avaliando STs de porcentagem de pacientes e modelando
+
+Visão geral de como as porcentagens se comportam.
+
+```{r}
+autoplot(espondilite.pct, pct_usuarios) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao)) + 
+  facet_wrap(~no_identificador)
+```
+
+ADAL parece começar a diminuir na última incorporação (SECU). ETAN acentua o decaimento na segunda (GOLI), mas já perde mercado na primeira (?) (METO injetável)
+
+Análise das séries
+
+```{r}
+adal.pct <- espondilite.pct %>% 
+  filter(no_identificador == "ADAL")
+
+cpgram(adal.pct$pct_usuarios)
+
+# faz sentido fazer o cpgram da diferença?
+cpgram(difference(adal.pct$pct_usuarios))
+
+adal.pct %>% 
+gg_tsdisplay(pct_usuarios, plot_type = "partial")
+
+# Não é estacionário, então vai precisar diferenciar. 
+
+adal.pct %>% 
+gg_tsdisplay(difference(pct_usuarios), plot_type = "partial")
+
+# Mas a série diferenciada não apresenta nem ACF nem PACF com correlações significantes.
+# O que fazer nesse caso?
+
+espondilite.pct.2019 <- espondilite.pct %>% 
+  filter(ano_mes <= eventos_incorporacao[4])
+
+#ACF decai PACF com um pico em lag 1 = AR(1)
+
+espondilite.pct.model <- espondilite.pct.2019 %>% 
+  model(arima110 = ARIMA(pct_usuarios ~ pdq(1,1,0)), 
+        arima_errors = ARIMA(pct_usuarios ~ qt_usuarios + pdq(1,1,0)),
+        stepwise = ARIMA(pct_usuarios))
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "ADAL") %>% 
+  glance()
+```
+
+## 12, 24, 60 MESES ADAL
+
+```{r}
+adal.pct.futuro <- adal.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes < eventos_incorporacao[4] + 60)
+
+adal.pct.cast <- espondilite.pct.model %>% 
+  # select(arima_errors) %>% 
+  filter(no_identificador == "ADAL") %>% 
+  forecast(new_data = adal.pct.futuro)
+
+autoplot(adal.pct.cast, adal.pct) + 
+  facet_wrap(~ .model) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4] + c(12,24,60)))
+```
+
+## ANÁLISE INFL
+
+```{r}
+infl.pct <- espondilite.pct %>% 
+  filter(no_identificador == "INFL")
+
+cpgram(infl.pct$pct_usuarios)
+## WN OK
+
+infl.pct %>% 
+  gg_tsdisplay(pct_usuarios, plot_type = "partial")
+
+# Fora o timeplot, ACF e PACF parecem ter o mesmo comportamento de ADAL AR(1)
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "INFL") %>% 
+  glance()
+
+# o AIC stepwise está mais baixo que os outros.
+```
+
+## 12, 24, 60 MESES INFL
+
+```{r}
+infl.pct.futuro <- infl.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes < eventos_incorporacao[4] + 60)
+
+infl.pct.cast <- espondilite.pct.model %>% 
+  filter(no_identificador == "INFL") %>% 
+  forecast(new_data = infl.pct.futuro)
+
+autoplot(infl.pct.cast, infl.pct) + 
+  facet_wrap(~ .model) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4] + c(12,24,60)))
+```
+## ANÁLISE METO (oral)
+
+```{r}
+meto.oral.pct <- espondilite.pct %>% 
+  filter(no_identificador == "METO", via == "oral")
+
+cpgram(meto.oral.pct$pct_usuarios)
+## WN OK
+
+meto.oral.pct %>% 
+  gg_tsdisplay(pct_usuarios, plot_type = "partial")
+# Como o ADAL e o INFL, METO oral parece ser AR(1) pela análise dos (P)ACF
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "METO", via == "oral") %>% 
+  glance()
+
+# o AIC stepwise está mais baixo que os outros.
+```
+## 12, 24, 60 MESES METO oral
+
+```{r}
+meto.oral.pct.futuro <- meto.oral.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes < eventos_incorporacao[4] + 60)
+
+meto.oral.pct.cast <- espondilite.pct.model %>% 
+  filter(no_identificador == "METO", via == "oral") %>% 
+  forecast(new_data = meto.oral.pct.futuro)
+
+autoplot(meto.oral.pct.cast, meto.oral.pct) + 
+  facet_wrap(~ .model) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4] + c(12,24,60)))
+```
+
+o modelo ML com erros arima continua sendo o melhor ajust para os meses subsequentes. # TODO IC cruza o zero, como tratar?
+
+## Análise METO injetável
+
+```{r}
+meto.injetavel.pct <- espondilite.pct %>% 
+  filter(no_identificador == "METO", via == "injetavel")
+
+cpgram(meto.injetavel.pct$pct_usuarios)
+## WN OK
+
+meto.injetavel.pct %>% 
+  gg_tsdisplay(pct_usuarios, plot_type = "partial")
+# Como o ADAL,INFL, e METO oral, parece ser AR(1) pela análise dos (P)ACF
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "METO", via == "injetavel") %>% 
+  glance()
+# o AIC do arima110 está mais baixo que os outros.
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "METO", via == "injetavel")
+# porque o stepwise chegou em 010?
+
+```
+
+# TODO Última data dos dados não chega nos 60 meses, então a estimativa só vai até `r max(espondilite.pct$ano_mes)`
+
+```{r}
+meto.injetavel.pct.futuro <- meto.injetavel.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes < eventos_incorporacao[4] + 60)
+
+meto.injetavel.pct.cast <- espondilite.pct.model %>% 
+  filter(no_identificador == "METO", via == "injetavel") %>% 
+  forecast(new_data = meto.injetavel.pct.futuro)
+
+autoplot(meto.injetavel.pct.cast, meto.injetavel.pct) + 
+  facet_wrap(~ .model) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4] + c(12,24,60)))
+```
+
+ML com erros arima foi o que melhor se aproximou dos dados observados nos 12 meses seguintes, mas depois disso se distanciou.
+
+## Análise GOLI
+
+```{r}
+goli.pct <- espondilite.pct %>% 
+  filter(no_identificador == "GOLI")
+
+cpgram(goli.pct$pct_usuarios)
+## WN OK
+
+goli.pct %>% 
+  gg_tsdisplay(pct_usuarios, plot_type = "partial")
+# Como os anteriores, parece ser AR(1) pela análise dos (P)ACF
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  glance()
+# o AIC do stepwise está mais baixo que os outros.
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "GOLI")
+# Como que chega em 010?
+```
+
+```{r}
+goli.pct.futuro <- goli.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes < eventos_incorporacao[4] + 60)
+
+goli.pct.cast <- espondilite.pct.model %>% 
+  filter(no_identificador == "GOLI") %>% 
+  forecast(new_data = goli.pct.futuro)
+
+autoplot(goli.pct.cast, goli.pct) + 
+  facet_wrap(~ .model) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4] + c(12,24,60)))
+```
+
+Os três modelos conseguiram aproximar até 12 meses, após esse período, somente ML com erros arima manteve as observações dentro do seu IC 95%. 
+É interessante que não só esse modelo até agora teve um pico próximo do pico que foi observado e que não parecia ter relação com os dados anteriores (possível que pela relação com qt_usuarios).
+
+## Análise CERT
+
+Certolizumabe foi incorporado muito próximo do medicamento seguinte, portanto há poucos dados até a data de interesse.
+
+```{r}
+cert.pct <- espondilite.pct %>% 
+  filter(no_identificador == "CERT")
+
+cpgram(cert.pct$pct_usuarios)
+## WN OK
+
+cert.pct %>% 
+  gg_tsdisplay(pct_usuarios, plot_type = "partial")
+# Como os anteriores, parece ser AR(1) pela análise dos (P)ACF
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "CERT") %>% 
+  glance()
+# só foi gerado modelo stepwise, por que não para outros?
+
+cert.pct %>% 
+  filter(ano_mes < eventos_incorporacao[4])
+```
+
+Como comentado, há poucos dados para se fazer um modelo, somente dois meses. Portanto, utilizamos um periodo maior.
+
+```{r}
+cert.pct.model <- cert.pct %>% 
+  filter(ano_mes < (eventos_incorporacao[4] + 12)) %>% 
+  model(arima110 = ARIMA(pct_usuarios ~ pdq(1,1,0)), 
+        arima_errors = ARIMA(pct_usuarios ~ qt_usuarios + pdq(d = 1)),
+        stepwise = ARIMA(pct_usuarios))
+
+cert.pct.model %>% 
+  glance()
+
+cert.pct.model
+# Com erros ARIMA 010 e mais doze meses, foi possivel gerar o modelo. Arima erros teve AIC mais baixo que o restante.
+# com a adição de 12 meses, também foi possível gerar um modelo arima110
+
+```
+
+```{r}
+cert.pct.futuro <- cert.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4] + 12, ano_mes < eventos_incorporacao[4] + 60)
+
+cert.pct.cast <- cert.pct.model %>% 
+  forecast(new_data = cert.pct.futuro)
+
+autoplot(cert.pct.cast, cert.pct) + 
+  facet_wrap(~ .model) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4] + c(12,24,60)))
+```
+
+Com os poucos dados não foi possível gerar nenhum modelo útil. Como a incorporação seguinte foi logo em seguida, praticamente toda a curva de difusão do certolizumabe está contida no periodo seguinte. Façamos mais uma análise usando um periodo mais extenso.
+
+## Análise SECU
+
+Secuquinumabe foi o último medicamento a ser incorporado no periodo, então não faz sentido fazer uma estimativa do impacto de sua incorporação em si mesmo. Ainda assim, é interessante verificar se é possível criar um modelo para predizer o comportamento futuro, como com o certolizumabe. 
+
+```{r}
+secu.pct <- espondilite.pct %>% 
+  filter(no_identificador == "SECU")
+
+cpgram(secu.pct$pct_usuarios)
+## WN OK
+
+secu.pct %>% 
+  gg_tsdisplay(pct_usuarios, plot_type = "partial")
+# Como os anteriores, parece ser AR(1) pela análise dos (P)ACF
+```
+
+```{r}
+secu.pct.model <- secu.pct %>% 
+  filter(ano_mes < (eventos_incorporacao[4] + 12)) %>% 
+  model(arima110 = ARIMA(pct_usuarios ~ pdq(1,1,0)), 
+        arima_errors = ARIMA(pct_usuarios ~ qt_usuarios + pdq(d = 1)),
+        stepwise = ARIMA(pct_usuarios))
+
+secu.pct.model %>% 
+  glance()
+
+secu.pct.model
+# Com erros ARIMA 010 e doze meses, foi possivel gerar um modelo. Stepwise (ARIMA(0,1,0) w/ drift) teve AIC mais baixo que o restante.
+```
+
+```{r}
+secu.pct.futuro <- secu.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4] + 12, ano_mes < eventos_incorporacao[4] + 60)
+
+secu.pct.cast <- secu.pct.model %>% 
+  forecast(new_data = secu.pct.futuro)
+
+autoplot(secu.pct.cast, secu.pct) + 
+  facet_wrap(~ .model) + 
+  geom_vline(xintercept = as.Date(eventos_incorporacao[4] + c(12,24,60)))
+```
+
+Apesar de o stepwise tem um AIC melhor que o arima110, este foi o único modelo a conter alguns valores observados. Mesmo assim, após 12 meses as curvas predita e observada se distanciam, deixando de ter interseção com o IC da estimativa.
+
+
+## OLHAR ETAN POR ULTIMO
+
+```{r}
+etan.pct <- espondilite.pct %>% 
+  filter(no_identificador == "ETAN")
+
+cpgram(etan.pct$pct_usuarios)
+#WN ok
+
+etan.pct %>% 
+  gg_tsdisplay(pct_usuarios, plot_type = "partial")
+# spike PACF em lag 1 indica AR(1), não estacionário na média -> ARIMA(1,1,0) mesmo q para ADAL então não preciso gerar modelo novo
+
+etan.pct %>% 
+  gg_tsdisplay(difference(pct_usuarios), plot_type = "partial")
+
+etan.pct.futuro <- etan.pct %>% 
+  filter(ano_mes >= eventos_incorporacao[4], ano_mes < eventos_incorporacao[4] + 60)
+
+espondilite.pct.model %>% 
+  filter(no_identificador == "ETAN") %>% 
+  glance()
+
+etan.pct.cast <- espondilite.pct.model %>% 
+  select(stepwise) %>% 
+  filter(no_identificador == "ETAN") %>% 
+  forecast(new_data = etan.pct.futuro)
+
+autoplot(etan.pct.cast, etan.pct)
+
+
+```
+
+
+
+
+
+
+
+
+# A partir daqui foi separado por medicamento, mas acho q não seja necessario.
+
+Adalimumabe (ADAL)
+
+```{r}
+cpgram(adal.all$qt_usuarios) 
+cpgram(adal.all$diff1) 
+
+adal.all %>% 
+  gg_tsdisplay(diff1, plot_type='partial')
+
+# observações do começo de ~2020~ 2021 muito diferentes, avalia-se remover.
+adal.all %>% 
+  arrange(desc(diff1^2))
+
+# removendo as 3 mais fortes
+# adal.filtered <- adal.all %>% 
+#   filter(!ano_mes %in% seq(yearmonth('202103', format='%Y%m'), yearmonth('202105', format='%Y%m'), by=1)) %>% 
+#   fill_gaps()
+
+adal.2019 <- adal.all %>% 
+  filter(ano_mes <  yearmonth('201912', format='%Y%m'))
+
+# quais eventos?
+eventos_incorporacao
+
+adal.model <- adal.2019 %>% 
+  model(arima111 = ARIMA(qt_usuarios ~ pdq(1,1,1)),
+        stepwise = ARIMA(qt_usuarios),
+        arima_errors = ARIMA(qt_usuarios ~ trend(eventos_incorporacao)),
+        concorr_arima_errors = ARIMA(qt_usuarios ~ qt_concorrentes + trend(eventos_incorporacao)))
+
+
+# adal.model <- adal.all %>%
+#   model(arima111 = ARIMA(qt_usuarios ~ pdq(1,1,1)),
+#         stepwise = ARIMA(qt_usuarios),
+#         arima_errors = ARIMA(qt_usuarios ~ trend(eventos_incorporacao)))
+
+glance(adal.model)
+
+adal.model %>% 
+  select(arima_errors) %>% 
+  gg_tsresiduals()
+
+adal.cast <- adal.model %>% 
+  select(concorr_arima_errors) %>% 
+  forecast(h = 60)
+
+foreplot(adal.2019, adal.cast) + 
+  geom_line(data = adal.all, aes(x = ano_mes, y = qt_usuarios), color="blue") + 
+  geom_line(data = fitted(adal.model), aes(x = ano_mes, y = .fitted, colour = .model))
+```
+
+Olhando para o gráfico predito e o observado, parece ter uma alteração no trend do adalimumabe por volta do ano 2018, em que o predito se distancia do observado.
+Para avaliar melhor, é interessante fazer as predições a partir de uma incorporação?
+
+Verificando as datas de primeira dispensação de cada medicamento:
+
+```{r}
+espondilite.all %>% 
+  group_by(no_identificador) %>% 
+  summarise(primeira_dispensacao = min(ano_mes)) %>% 
+  arrange(primeira_dispensacao)
+```
+
+Interessante seria avaliar ADAL, ETAN, INFL e METO até 2017/09, fazer as predições e comparar com os cinco anos seguintes (ou pelo menos até 2018/12) para ver a alteração no trend de cada um.
+Depois, repetir o procedimento adicionando GOLI e predizendo com dados de até 2018/12 para o periodo até 2019/02 e assim por diante.
+
+Teria de marcar uma coluna de "evento_incorporacao" para cada ocorrencia na data, ou a partir da data, da primeira dispensação de uma droga nova?
+
+Etanercepte (ETAN)
+
+```{r}
+cpgram(etan.all$qt_usuarios) 
+cpgram(etan.all$diff1) 
+
+etan.all %>% 
+  gg_tsdisplay(diff1, plot_type='partial')
+
+etan.model <- etan.all %>% 
+  model(arima201 = ARIMA(qt_usuarios ~ pdq(2,0,1) + PDQ(1,0,0) + 1),
+        stepwise = ARIMA(qt_usuarios))
+
+glance(etan.model)
+
+etan.model %>% 
+  select(stepwise) %>% 
+  gg_tsresiduals()
+
+etan.cast <- etan.model %>% 
+  select(stepwise) %>% 
+  forecast(h = 60)
+
+foreplot(etan.all, etan.cast)
+```
+
+Infliximabe (INFL)
+
+```{r}
+cpgram(infl.all$qt_usuarios) 
+cpgram(infl.all$diff1) 
+
+infl.all %>% 
+  gg_tsdisplay(diff1, plot_type='partial')
+
+infl.model <- infl.all %>% 
+  model(arima201 = ARIMA(qt_usuarios ~ pdq(0,0,3) + PDQ(1,0,0) + 1),
+        stepwise = ARIMA(qt_usuarios))
+
+infl.model
+glance(infl.model)
+
+infl.model %>% 
+  select(stepwise) %>% 
+  gg_tsresiduals()
+
+infl.cast <- infl.model %>% 
+  select(stepwise) %>% 
+  forecast(h = 60)
+
+foreplot(infl.all, infl.cast)
+```
+Metotrexato (METO) Oral
+
+```{r}
+cpgram(meto.all.oral$qt_usuarios) 
+cpgram(meto.all.oral$diff1) 
+
+meto.all.oral %>% 
+  gg_tsdisplay(diff1, plot_type='partial')
+
+meto.model.oral <- meto.all.oral %>% 
+  model(arima201 = ARIMA(qt_usuarios ~ pdq(0,0,4)),
+        stepwise = ARIMA(qt_usuarios))
+
+meto.model.oral
+glance(meto.model.oral)
+
+meto.model.oral %>% 
+  select(stepwise) %>% 
+  gg_tsresiduals()
+
+meto.cast.oral <- meto.model.oral %>% 
+  select(stepwise) %>% 
+  forecast(h = 60)
+
+foreplot(meto.all.oral, meto.cast.oral)
+```
+
+
+```{r}
+autoplot(meto.all.injetavel, qt_usuarios) + autoplot(meto.all.injetavel, diff1) + 
+  plot_annotation(title="Metotrexato METO Injetável")
+```
+
+
+```{r}
+autoplot(goli.all, qt_usuarios) + autoplot(goli.all, diff1) + 
+  plot_annotation(title="Golimumabe (GOLI)")
+```
+
+
+```{r}
+autoplot(cert.all, qt_usuarios) + autoplot(cert.all, diff1) + 
+  plot_annotation(title="Certulizumabe Pegol (CERT)")
+```
+
+
+```{r}
+autoplot(secu.all, qt_usuarios) + autoplot(secu.all, diff1) + 
+  plot_annotation(title="Secuquinumabe (SECU)")
+```
+
+# TODO predizer para todos, somar em espondilite.all e comparar o total de preditos (a partir de 2016) com o real observado
+# Usar uma data de cutoff = incorporação de uma nova droga? 
+
+```{r}
+
+save.image(file = "M45.RData") 
+```
+

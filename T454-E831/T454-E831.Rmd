@@ -1,0 +1,181 @@
+---
+title: "T454-E831 - Sobrecarga De Ferro"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+pdf_document: default
+html_document: default
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/T454-E831/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+load("T454-E831.RData")
+
+# preenchendo os gaps com 0
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios)) 
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Bastantes dados, desde março de 2010. Crescimento estável, com alguma variância ao decorrer da série.
+
+```{r}
+autoplot(soma, d1) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Estacionária na média, maior variância em 2017, mas com picos bem espaçados.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão novamente.
+
+```{r}
+tratamentos
+```
+
+Somente Deferasirox usado no tratamento, em quatro dosagens ou apresentações.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+```
+
+A análise dos gráficos de autocorrelação sugere AR(1), pois tem FAC decrescente infinita e FACP com pico em lag 1 e zero depois. Série estacionária na média quando diferenciada.
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios)
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+```{r}
+soma %>% 
+  model(stl = STL(qt_total_usuarios)) %>% 
+  components() %>% 
+  autoplot() +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+Há um crescimento aparentemente constante até 2018, sofrendo uma queda e voltando a crescer em 2019. No meio de 2021 há um novo início no declínio, que talvez seja interessante adicionar ao modelo caso seja modelado com dados até 2022.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2020, para ter pelo menos 1 ano completo de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) %>% 
+  arrange(AIC) 
+
+```
+
+Mais uma vez o modelo linear simples teve o melhor AIC (1242.418) para a base de treino até maio de 2020. O ARIMA selecionado pelo stepwise foi o ARIMA sazonal (0,1,0)(1,0,1)[12], e teve AIC 1428.828. O ARIMA proposto teve AIC 1437.342. O restante dos modelos teve AIC maior que 1680.
+
+# Análise de resíduos
+
+```{r}
+newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+```
+
+Winkler de binomial negativa
+
+```{r}
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(nb.cast) #var da serie
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+```
+
+Unindo os forecasts para os cálculos de REQM e Winkler.
+
+```{r}
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+O alisamento exponencial de Holt teve o melhor REQM (158.7767), seguido do ARIMA proposto durante a análise das autocorrelações (158.9162). Os melhores escores de winkler foram o LM (839.4227), o AAN (1022.4623) e o mesmo ARIMA (1090.0531).
+
+análise dos gráficos
+
+```{r}
+
+cast %>%
+  filter(.model != 'arima') %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+O comportamento dos modelos AAN e arima110 é bastante parecido, nenhum dos dois foi capaz de predizer a queda no último ano, mas ambos contiveram-na em seu intervalo preditivo. Apesar de um bom escore, o LM estimou a média acima do observado já no primeiro mês, se aproximando do real à medida que este se elevava.
+Sugere-se o uso do método de Holt para a modelagem deste PCDT.
+
+```{r}
+save.image('T454-E831.RData')
+```

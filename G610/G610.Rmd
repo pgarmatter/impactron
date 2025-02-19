@@ -1,0 +1,172 @@
+---
+title: "D610 - Síndrome de Gillain-Barré"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output: html_document
+---
+  
+```{r}
+setwd("E:/GEATS/Estimador-AIO-SUS/G610/")
+library(fpp3)
+library(tidyverse)
+library(RPostgres)
+library(DBI)
+library(ggfortify)
+library(MASS)
+library(distributional)
+# library(GGally)
+# library(ggdist)
+# library(splines)
+# library(patchwork)
+
+select <- dplyr::select
+
+
+load("G610.RData")
+
+soma <- soma %>% 
+  as_tsibble() %>% 
+  mutate(d1 = difference(qt_total_usuarios))
+
+```
+
+# Exploratória
+
+```{r, grafico}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+
+soma %>% 
+  model(classical_decomposition(qt_total_usuarios, type='additive')) %>% 
+  components() %>% 
+  autoplot() +
+  labs(title = "Decomposição da série de número de pacientes de D610", 
+       subtitle = 'tratados no SUS com imunoglobulina humana')
+```
+
+Comportamento estranho, não observado entre os outros PCDTs que usam imunoglobulina. Picos em 2015, 2016 e crescimento a partir do final de 2020, sem parar, até o final dos dados.
+
+```{r}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Superdispersão, não da para usar Poisson normal.
+
+```{r}
+unique(tratamentos$no_procedimento)
+```
+
+Somente IMUNOGLOBULINA HUMANA é usada no tratamento, diversas doses.
+
+```{r}
+gg_tsdisplay(soma, y = qt_total_usuarios ,plot_type = "partial")
+
+gg_tsdisplay(soma, y = d1 ,plot_type = "partial")
+```
+
+Estacionária, com picos de variância nos ultimos anos. PACF sugere AR 1. ACF com decaimento exponencial, pico no lag 1 do PACF
+
+```{r}
+ljung_box(soma$qt_total_usuarios, lag = 12) # rejeita H0
+ljung_box(soma$qt_total_usuarios, lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios), lag = 24) # rejeita H0
+
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 12)
+ljung_box(difference(soma$qt_total_usuarios, differences = 2), lag = 24)
+```
+
+No teste de LB, rejeita a H0 para lag = 1 ano.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) +
+  labs(title = 'Periodograma acumulado da série de pacientes de D610')
+```
+
+ACF, LB e CPGRAM indicam não ser ruído branco.
+
+# Modelagem
+
+Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. Devido à superdispersão, não é possível para usar poisson no glm, mas quasi-poisson ou binomial negativa devem funcionar.
+Base separada temporalmente até maio de 2020, para ter 2 anos completos de dados para a validação.
+
+```{r}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+
+glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c('quasipoisson', 'binom.neg'), AIC = c(NA, AIC(binomialneg)))) 
+```
+
+Como com os outros PCDTs que usam somente imunoglubulina humana do CEAF1a analisados até agora (D59, D80-83, G70 e D693), o modelo linear simples foi o melhor para a base de treino até maio de 2020. 
+
+# Análise de resíduos
+
+falta avaliar os intervalos de predição de quasip e nbinom.
+
+```{r}
+newdata <- soma %>% filter(ano_mes >= yearmonth("2020/06"))
+
+cast <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = 'F',
+                ano_mes = unique(cast$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast <- cast %>%
+  bind_rows(nb.cast)
+
+cast %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95)
+```
+
+Apesar de o arima automatico (naive com erro ~normal acumulado) ter um AIC melhor q o ARIMA 110 com drift, o escore winkler do 110 com drift foi o melhor entre os modelos ajustados. Além disso, este modelo teve o segundo melhor REQM (147.5 contra 101.9 do LM). O desempenho de Holt para esta condição foi o segundo em winkler (690 contra 463.1 do arima111) e terceiro em REQM (148.4, logo acima do arima111). 
+
+```{r}
+models$B
+```
+
+análise dos gráficos
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model) 
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+```
+
+Percebe-se que, em todos eles, os intervalos preditivos foram bem maiores que nos modelos anteriores (métrica pra isso aqui?). Os modelos foram capazes de predizer a variância iminente, sem assertividade quanto ao seu sentido. Como comentado anteriormente, arima automático se trata de um naive com erros cumulativos, enquanto o 111 com drift conseguiu capturar a tendencia crescente da série, bem como o AAN. O único modelo a estimar uma tendencia negativa foi o MAN.
+
+
+```{r}
+save.image('G610.RData')
+```

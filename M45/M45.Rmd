@@ -1,0 +1,650 @@
+---
+title: "M45 - Espondilite Ancilosante"
+author: "Pietro Garmatter"
+date: "`r Sys.Date()`"
+output:
+  html_document: 
+    toc: yes
+    fig_width: 13
+    fig_height: 6
+    fig_caption: yes
+  html_notebook: 
+    toc: yes
+    fig_width: 13
+    fig_height: 6
+    fig_caption: yes
+  word_document: 
+    fig_width: 13
+    fig_height: 6
+    fig_caption: yes
+    toc: yes
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(fpp3)
+library(tidyverse)
+library(DBI)
+# library(data.table)
+library(GGally)
+library(ggdist)
+library(ggfortify)
+library(MASS)
+library(splines)
+library(patchwork)
+library(distributional)
+library(kableExtra)
+# library(ggridges)
+source("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/lib/modelagem.R")
+
+setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/M45")
+load("M45.RData")
+
+select <- dplyr::select
+
+CID = 'M45'
+prefixo = paste0(getwd(), '/', CID, '-')
+```
+
+# Exploratória
+
+```{r, grafico serie soma}
+autoplot(soma, qt_total_usuarios) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+```
+
+```{r, media variancia}
+mean(soma$qt_total_usuarios)
+var(soma$qt_total_usuarios)
+```
+
+Apesar de bastantes observações, média e variância diferentes. É possível fazer análises, mas não utilizar Poisson no GLM (superdispersão).
+
+
+```{r, time series soma}
+tsd <- gg_tsdisplay(soma, y = qt_total_usuarios, plot_type = "partial")
+
+# diferenciada
+soma %>% mutate(d1 = difference(qt_total_usuarios)) %>% 
+  autoplot(d1) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+ggsave(paste0(prefixo, 'diferenciada.png'))
+
+tsd[[1]] + 
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+ggsave(paste0(prefixo, 'time-series.png'))
+
+tsd[[2]] + ylab(label = 'FAC')
+ggsave(paste0(prefixo, 'fac.png'))
+
+tsd[[3]] + ylab(label = 'FACP')
+ggsave(paste0(prefixo, 'facp.png'))
+
+# parenteses em porcentagens
+pcen %>% 
+  mutate(medicamento = paste(no_identificador, via)) %>% 
+  ggplot(aes(x = ano_mes, y = pct_usuarios, fill = medicamento)) + 
+  geom_area(alpha = 0.7) +
+  ylab('porcentagem de pacientes') + 
+  scale_y_continuous(breaks = seq(10, 100, 10)) +
+  scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+ggsave(paste0(prefixo, 'porcentagem.png'), width = 10, height = 7)
+
+rm(tsd)
+```
+
+FAC e FACP sugerem processo AR(1). Série diferenciada bastante estacionária, com um pico de variância perto do final.
+
+```{r}
+(lb12 = format(ljung_box(soma$qt_total_usuarios, lag = 12)["lb_pvalue"], nsmall = 4))
+(lb24 = format(ljung_box(soma$qt_total_usuarios, lag = 24)["lb_pvalue"], nsmall = 4))
+```
+
+Os testes de Ljung-Box para 12 e 24 meses rejeita a hipótese nula de que a série seja ruído branco com valores de p iguais a `r lb12` e `r lb24`.
+
+```{r}
+ggcpgram(soma$qt_total_usuarios) 
+# + labs(title = 'Periodograma acumulado da série de pacientes de espondilite ancilosante.')
+ggsave(paste0(prefixo, 'pgram.png'))
+
+```
+
+Tudo indica poder ser modelado.
+
+# Modelagem (soma)
+
+Propondo arima(110) com drift e sem sazonalidade.
+
+```{r, modelagem soma}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+
+models <- soma.treino %>% 
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios),
+        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        E = TSLM(qt_total_usuarios ~ ano_mes))
+        
+quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
+
+binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
+nb.label = "F"
+
+(aics <- glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c(nb.label), AIC = c(AIC(binomialneg)))) )
+
+```
+
+O modelo E (TSLM) foi o com o melhor AIC, seguido dos A e B (ambos ARIMAs). O modelo B (ARIMA(1,1,1)(0,0,1)[12] w/ drift) teve um AIC um pouco abaixo do A.
+
+# Análise de resíduos (soma)
+
+```{r acurácia treino 12 e 24 meses}
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = nb.label,
+                ano_mes = unique(cast.12$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast.12 <- cast.12 %>%
+  bind_rows(nb.cast)
+
+sm.f.acc.12 <- cast.12 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) 
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = nb.label,
+                ano_mes = unique(cast.24$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast.24 <- cast.24 %>%
+  bind_rows(nb.cast)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
+
+```
+
+
+```{r tabelas acurácia treino 12 e 24 meses}
+boldmap = sm.f.acc %>% mutate(across(starts_with(c("AIC", "REQM", "wink")), ~ (.x == min(.x, na.rm = T)) %in% T))
+
+knitr::kable(sm.f.acc, align = 'c') %>% 
+  column_spec(2, bold = boldmap$AIC) %>% 
+  column_spec(3, bold = boldmap$REQM.0) %>% 
+  column_spec(4, bold = boldmap$REQM.12) %>% 
+  column_spec(5, bold = boldmap$REQM.24) %>%
+  column_spec(6, bold = boldmap$winkler.12) %>% 
+  column_spec(7, bold = boldmap$winkler.24)
+  
+knitr::kable(sm.f.acc, align = 'c', format = 'latex') %>% 
+  column_spec(2, bold = boldmap$AIC) %>% 
+  column_spec(3, bold = boldmap$REQM.0) %>% 
+  column_spec(4, bold = boldmap$REQM.12) %>% 
+  column_spec(5, bold = boldmap$REQM.24) %>%
+  column_spec(6, bold = boldmap$winkler.12) %>% 
+  column_spec(7, bold = boldmap$winkler.24)
+
+```
+
+O modelo D (alisamento exponencial com erros multiplicativos) teve melhor REQM e escore, seguido do modelo A proposto (ARIMA 110).
+
+# análise dos gráficos (soma)
+
+```{r}
+
+cast %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") +
+  scale_x_yearmonth(date_breaks = '2 years', date_labels='%Y') +
+  theme(legend.position="none") 
+  # labs(title = "Estimativas de número de pacientes com espondilite ancilosante no SUS", subtitle = "a partir de 2020/06")
+# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+
+ggsave(paste0(prefixo, 'soma-models.png'), width = 15, height = 7)
+
+```
+
+Percebe-se que o modelo D realmente é a melhor opção para modelar a demanda total, uma vez que contém os dados observados, mas principalmente por aproximar a média melhor aos dados. O intervalo poderia ser menor se não houvesse picos de variância imprevisíveis no período de validação.
+
+# Análises de medicamentos
+
+```{r}
+tratamentos %>% 
+  select(no_identificador, via, somente_adulto, linha_tto_periferica, doses_inducao, doses_mensais) %>% 
+  unique()
+```
+
+Há 8 tratamentos no total até a data final da coleta dos dados.
+
+```{r rechaveamento de meds}
+meds <- meds %>% 
+  mutate(key = paste(no_identificador, via, sep = '_')) %>% 
+  as_tsibble(key = key, index = ano_mes)
+```
+
+
+```{r decomposição e exploratória sobre a diferenciada da tendencia}
+meds.dcmp <- meds %>%
+  model(MLT = STL(qt_usuarios ~ trend() + season(0))) %>%
+  components() %>%
+  group_by(key) %>%
+  mutate(d1 = difference(trend)) %>%
+  as_tsibble(key = key) %>%
+  right_join(meds) %>%
+  select(-.model)
+
+ggplot(meds.dcmp, aes(x = ano_mes, y = d1, colour = key)) + 
+  geom_line(linewidth = 1) +
+  facet_wrap(~ as.ordered(linha_tto_periferica)) +
+  labs(title = "Por linha de tratamento periferica")
+
+ggplot(meds.dcmp, aes(x = as.ordered(linha_tto_periferica), y = d1, colour = key)) + 
+  geom_jitter() +
+  labs(title = "Por linha de tratamento periferica")
+```
+
+Não parece ter uma relação direta, mas drogas na primeira linha (entre as estudadas) tendem a ter uma alteração constante e baixa. Segunda linha apresenta mais variancia, com drogas mostrando valores negativos. Observa-se maior variancia na linha 5 que nas outras.
+
+```{r exploratória sobre a d1 contra concorrentes}
+ggplot(meds.dcmp, aes(x = qt_concorrentes, y = d1, colour = key)) + 
+  geom_jitter() +
+  labs(title = "Por qt_concorrentes")
+```
+
+Percebe-se, maior variância no aumento conforme a concorrencia cresce. Contudo, O aumento parece diminuir quanto maior o numero de concorrentes (para a mesma) ou se manter estável. Comportamento varia entre as drogas.
+
+```{r}
+ggplot(meds.dcmp, aes(x = doses_inducao, y = d1, colour = key)) + 
+  geom_jitter() +
+  labs(title = "Por doses_inducao")
+```
+
+Entre os medicamentos que têm dose de indução, quanto maior o periodo de indução, maior parece se o aumento mensal no uso.,
+
+```{r}
+ggplot(meds.dcmp, aes(x = doses_mensais, y = d1, colour = key)) + 
+  geom_jitter() +
+  labs(title = "Por doses_mensais")
+```
+
+O número de doses mensais parece ser inversamente proporcional ao aumento de usuários, com maior variância para ETAN que outros medicamentos de doses semanais.
+
+
+```{r}
+ggplot(meds.dcmp, aes(x = qt_total_usuarios, y = d1, colour = key)) + 
+  geom_line() +
+  labs(title = "Por qt_total_usuarios")
+```
+
+Fora o etanercepte, o número total de pacientes não parece influenciar na taxa de crescimento.
+
+```{r definição de treino, colunas e modelagem de medicamentos (tentativa falha)}
+meds.treino <- meds %>% filter(ano_mes < yearmonth("2020/06"))
+
+colunas_tslm <- . ~ qt_concorrentes * (ano_mes + qt_total_usuarios) 
+
+colunas_lm <- . ~ qt_concorrentes +
+  (as.ordered(linha_tto_periferica) +
+   somente_adulto +
+   no_forma_organizacao +
+   doses_inducao +
+   doses_mensais) * (qt_concorrentes) +
+  (ano_mes + qt_total_usuarios) 
+
+model <- mltrend(
+  meds.treino,
+  qt_usuarios,
+  group = vars(key),
+  columns = colunas_lm
+)
+```
+
+
+Via não pode entrar no modelo, pois só teria um nível do fator por série. Como na análise de séries temporais cada série gera um modelo, não posso usar variáveis que sejam usadas na chave. Porém, ao mesmo tempo, ao modelar as séries separadamente, perco a generalização que poderia ter para drogas novas. 
+
+Uma alternativa poderia ser a modelagem da diferenciada da tendência ignorando o tempo, considerando somente as variáveis que descrevem cada medicamento. Dessa forma, seria possível gerar um único modelo para projetar as tendências de todas as drogas
+
+Foram feitos ajustes seguindo a estratégia de decompor as séries, diferenciar a tendência e modelar a diferenciada com base nas covariáveis (qt_concorrentes, doses_inducao, doses_mensais, qt_usuarios_totais, no_forma_organizacao, somente_adulto, linha_tto_periferica) de diferentes formas. Em especial, foram feitas tentativas de modelar diferentes relações entre as variáveis e as diferenciadas.
+
+Comparando os gráficos da diferenciada da tendência de `meds` com o predito, percebe-se um bom ajuste inclusive para etanercepte, ainda que imperfeito para o período pós treino. Para ter uma noção melhor do poder preditivo, foi necessário reacumular a d1 e reintegrar os componentes da decomposição, a fim de chegar ao `qt_usuarios` realmente predito.
+
+Comparando os gráficos da diferenciada da tendência de `meds` com o predito, percebe-se um bom ajuste inclusive para etanercepte, ainda que imperfeito para o período pós treino. Para ter uma noção melhor do poder preditivo, foi necessário reacumular a d1 e reintegrar os componentes da decomposição, a fim de chegar ao `qt_usuarios` realmente predito.
+
+```{r reacumulando d1 predito}
+predict.mltrend(model, meds.dcmp, qt_usuarios, key) %>%
+  autoplot(meds, linewidth = 1) +
+  facet_wrap(~key, scales = "free")
+```
+
+Apesar de parecer ter um bom ajuste às séries diferenciadas, as séries reacumuladas diferiram das observadas no período pós-treino. Decidiu-se abandonar esta abordagem e seguir com as abordagens de séries temporais clássicas, por questão de tempo.
+
+Outras modelagens poderiam ser experimentadas com essa estratégia, buscando melhores alternativas de ajuste para os dados (GLM, por exemplo), ajustes com mais informações.
+
+## Seguindo com a modelagem dos medicamentos
+
+```{r}
+
+(lb <- meds %>%
+  group_by(key) %>%
+  reframe(lb12 = format(ljung_box(qt_usuarios, lag = 12)["lb_pvalue"], nsmall = 4),
+          lb24 = format(ljung_box(qt_usuarios, lag = 24)["lb_pvalue"], nsmall = 4)))
+
+for(i in unique(meds$key)) {
+  print((meds %>%
+     filter(key == i) %>%
+     as_tibble() %>%
+     select(qt_usuarios))$qt_usuarios %>%
+    ggcpgram() # + labs(title = paste("Periodograma acumulado", i))
+  )
+
+  ggsave(paste0(prefixo, i, "-pgram.png"))
+}
+```
+Os periodogramas acumulados de pacientes de todos os medicamentos aponta para a existência de componente sistemático a ser modelado. Sendo assim, a modelagem segue.
+
+```{r tsplot (meds)}
+for(i in unique(meds$key)) {
+  print(
+    tsd <- meds %>%
+      filter(key == i) %>%
+      gg_tsdisplay(qt_usuarios, plot_type = "partial") # + labs(title = paste("Gráficos temporais da série de pacientes de", i))
+    )
+    
+    # diferenciada
+    meds %>%
+      filter(key == i) %>% 
+      mutate(d1 = difference(qt_usuarios)) %>% 
+      autoplot(d1) +
+      scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+    ggsave(paste0(prefixo, i,'-diferenciada.png'))
+    
+    tsd[[1]] + 
+      scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+    ggsave(paste0(prefixo, i, '-time-series.png'))
+    
+    tsd[[2]] + ylab(label = 'FAC')
+    ggsave(paste0(prefixo, i, '-fac.png'))
+    
+    tsd[[3]] + ylab(label = 'FACP')
+    ggsave(paste0(prefixo, i, '-facp.png'))
+}
+rm(tsd)
+```
+
+A análise dos gráficos das funções de autocorrelação (ACF) e autocorrelação parcial (PACF), bem como das séries, sugere que todos os medicamentos para M45 seguem um processo AR(1): ACF decrescente infinito e PACF com pico em lag 1 e zero dali em diante. Dessa forma, foi proposto este modelo para o ARIMA A. 
+Além do proposto, serão ajustados: ARIMA com seleção automática stepwise; LM com erros ARIMA; decomposição em trend + remainder, sendo o trend modelado com ARIMA e o remainder NAIVE; método de alisamento exponencial linear de Holt; alisamento exponencial com erros multiplicativos; LM com componentes de séries temporais.
+
+```{r Modelagem (meds)}
+meds.treino <- meds %>% filter(ano_mes < yearmonth("2020/06"))
+
+meds.models <- meds.treino %>%
+  model(
+    A = ARIMA(qt_usuarios ~ 1 + pdq(1, 1, 0) + PDQ(0, 0, 0)),
+    B = ARIMA(qt_usuarios),
+    C = ARIMA(qt_usuarios ~ qt_concorrentes + qt_total_usuarios + pdq()),
+    D = decomposition_model(
+      STL(qt_usuarios ~ trend()),
+      ARIMA(trend ~ qt_concorrentes + qt_total_usuarios),
+      NAIVE(remainder)
+    ),
+    E = ETS(qt_usuarios ~ error("A") + trend("A") + season("N")),
+    F = ETS(qt_usuarios ~ error("M") + trend("A") + season("N")),
+    G = TSLM(qt_usuarios)
+  )
+
+meds.models %>% 
+  select(key, B:D)
+```
+
+os modelos C e D não foram gerados para os medicamentos CERT60438_injetavel, METO60453_injetavel e SECU60469_injetavel. Possívelmente pelo curto período disponível de dados e, consequentemente, inexistência de mais de um valor para qt_concorrentes. Sendo este valor constante durante a série, se impossibilita o ajuste dos modelos C e D.
+
+```{r análise de resíduos (acurácia de treino)}
+
+(mm.aics <- meds.models %>% select(-D) %>%
+   glance() %>%
+   select(key, .model, AIC) %>% 
+   bind_rows(data.frame(key = unique(meds$key), .model = 'D', AIC = NA)) %>% 
+   arrange(key, .model))
+
+# meds.models training accuracy
+mm.t.acc <- meds.models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NaN) %>% 
+  select(-.type) %>% 
+  relocate(key, .model, periodo, REQM) 
+
+# mm.t.acc <- mm.t.acc %>%
+#   pivot_wider(names_from = .model,
+#               names_prefix = "REQM.0.",
+#               values_from = REQM)
+```
+
+A tabela acima aponta para melhores ajustes de acordo com o REQM avaliado na própria base de treino. Ao tentar gerar escore winkler nessa base, é retornado NA. É interessante notar que o melhor modelo para uma droga pode não ser o melhor para outras, mesmo que tenham variáveis semelhantes. 
+
+```{r análise de resíduos (acurácia de predição )}
+# meds.models forecast accuracy 12 e 24
+
+newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 12)
+
+meds.cast.12 <- meds.models %>% 
+  forecast(new_data = newdata)
+
+mm.f.acc.12 <- meds.cast.12 %>%
+  accuracy(meds,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>%
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(key, .model, periodo, REQM, winkler) %>% 
+  arrange(key, .model)
+
+# 24
+newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 24)
+
+meds.cast.24 <- meds.models %>% 
+  forecast(new_data = newdata)
+
+mm.f.acc.24 <- meds.cast.24 %>%
+  accuracy(meds,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>%
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(key, .model, periodo, REQM, winkler) %>% 
+  arrange(key, .model)
+
+(mm.f.acc <- mm.aics %>%
+    inner_join(mm.t.acc) %>%
+    union(mm.f.acc.12) %>%
+    union(mm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(key, .model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(key, .model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
+```
+
+A tabela acima apresenta as métricas dos modelos quando avaliados quanto aos seu resíduos em relação à base de treino e aos dados reais para 12 e 24 meses. 
+
+```{r Avaliação das métricas conjuntamente, somente menores}
+
+for(i in unique(meds$key)){
+  
+  boldmap = mm.f.acc %>% 
+    filter(key == i) %>% 
+    mutate(across(starts_with(c("AIC", "REQM", "wink")), ~ (.x == min(.x, na.rm = T)) %in% T))
+
+  mm.f.acc %>% 
+    filter(key == i) %>% 
+    select(-key) %>% 
+    # knitr::kable(align = 'c', caption = i) %>% 
+    knitr::kable(align = 'c', caption = i, format = 'latex') %>% 
+    column_spec(2, bold = boldmap$AIC) %>% 
+    column_spec(3, bold = boldmap$REQM.0) %>% 
+    column_spec(4, bold = boldmap$REQM.12) %>% 
+    column_spec(5, bold = boldmap$REQM.24) %>%
+    column_spec(6, bold = boldmap$winkler.12) %>% 
+    column_spec(7, bold = boldmap$winkler.24) %>% 
+  print()
+  
+  print(
+    meds.cast.24 %>%
+      filter(key == i, !is.na(.mean)) %>% 
+      autoplot(meds) +
+      facet_wrap( ~ .model, scales = "free") +
+      scale_x_yearmonth(date_breaks = '2 years', date_labels='%Y') +
+      geom_vline(xintercept = as.Date(max(
+        meds.treino$ano_mes
+      ) + c(12, 24)), colour = "red") +
+      theme(legend.position="none") 
+      # labs(title = paste("Modelos ajustados para ", i),
+      #      caption = "linhas verticais representam 12 e 24 meses de predição.")
+  )
+  
+  ggsave(paste0(prefixo, i, '-models.png'), width = 15, height = 7)
+
+}
+
+```
+
+Já as tabelas e gráficos acima apresentam somente os modelos com os melhores REQM e escore Winkler. Sendo eles:
+
+### Adalimumabe
+
+O modelo ARIMA(1,1,1)(1,0,0)[12] w/ drift (B) teve o melhor REQM (1113.100) para 24 meses, ficando em segundo lugar para as outras métricas, quando comparado aos outros dois melhores modelos. O modelo LM w/ ARIMA(1,0,1)(1,0,0)[12] errors (C), por outro lado, teve os melhores REQMs tanto para a base de treino quanto para 12 meses, porém teve escore Winkler para 24 meses (29874.551) quase duas vezes o de B (17439.190). Por último, o modelo de alisamento exponencial com erros multiplicativos (F) teve os melhores escores tanto para 12 (5714.0130) quanto para 24 meses (12288.924), ainda que seus REQMs sejam maiores que os modelos concorrentes. Percebe-se pelos gráficos que há um comportamento inesperado (e possivelmente imprevisível) por volta de doze meses do início das predições. Portanto, o comportamento dos modelos entre 12 e 24 meses, apesar de condizente com o comportamento anterior, falha em predizer os números reais. Se subtraindo a influência da queda brusca por volta do décimo segundo mês, ambos os modelos B e C estimaram a tendência de crescimento neste período com um intervalo preditivo estreito quando comparado ao intervalo de F. Por fim, apesar da queda imprevisível, a sugestão é de utilizar o modelo B, uma vez que o modelo C depende da informação de número de pacientes totais tratados no SUS, número este que é desconhecido no momento da estimativa, mas pode ser estimado como já discutido. Ainda assim, o uso da estimativa agregaria ainda mais incerteza no modelo, por isso sugere-se o uso de B ao invés de C, apesar das melhores estimativas até 12 meses.
+
+### Certolizumabe pegol
+
+Entre os modelos ajustados para certolizumabe pegol, os melhores REQMs foram para os modelos A (ARIMA(1,1,0) w/ drift) e E (Alisamento exponencial linear de Holt). Os valores são próximos para a base de treino (13.18599 e 13.63935, respectivamente) e se distanciam com periodos maiores: 99.30221 e 88.55598 em 12 meses e 306.6435 e 281.3471 para 24 meses. Em relação ao escore Winkler, o modelo F (Alisamento exponencial com erros multiplicativos) tem o melhor escore para 24 meses (1554.0084), mas perde para o modelo A nos 12 primeiros meses preditos. Apesar de parecerem bons modelos para estimar o comportamento para até 12 meses, a presença de menos de 2 anos de dados impede que a modelagem seja satisfatória, esperando-se pelo menos 50 observações para uma boa modelagem usando os modelos propostos. Ainda assim, se usado com cautela, os modelos ainda tem certo valor. Isto posto, o ideal seria um novo ajuste com dados atualizados para o uso dos modelos. 
+
+### Etanercepte
+
+Apesar de o modelo C (LM w/ ARIMA(0,0,5)(1,0,0)[12] errors) ter o melhor REQM para a base de treino, suas estimativas para a base de validação são insatisfatórias. Seus REQMs para 12 e 24 meses, respectivamente, são 1438.0615 e 2204.2528, contra 114.0968 e 165.0482 do modelo B (ARIMA(1,2,1)). Este, por sua vez, parece ter capturado satisfatoriamente o comportamento decrescente do número de pacientes para etanercepte, junto com o modelo E (Holt). Ambos têm comportamentos semelhantes no período, um aproximando melhor a média (B) e o outro o fazendo com um intervalo preditivo menor (E). No uso prático dos modelos, seria recomendado utilizar o modelo B, uma vez que se aproximou melhor do comportamento observado e assume uma faixa maior de valores possíveis.
+
+### Golimumabe
+
+Os modelos com melhores ajustes para golimumabe foram ARIMA(1,1,0) w/ drift (A), suavização exponencial de Holt (E) e suavização exponencial com erros multiplicativos (F). Dentre eles, o melhor ajuste para a base de treino foi o A, enquanto para 12 e 24 meses os melhores REQM foram F (141.5566 contra 145.7206 de E) e E (204.5839 contra 226.3469 de F). Para ambos os intervalos (um e dois anos) o modelo E teve escores melhores que as alternativas (469.3108 para 12 meses, seguido por A com 1307.2584; e 1020.4734 para 24 seguido por F com 3041.8353). A análise dos gráficos corrobora com escolha do modelo E para a estimativa dos números de pacientes de golimumabe.
+
+### Infliximabe
+
+Para Infliximabe, quatro modelos tiveram bons ajustes: ARIMA(1,1,0) w/ drift (A), ARIMA(0,1,1)(1,0,0)[12] w/ drift (B), LM w/ ARIMA(2,0,1)(1,0,0)[12] errors (C), e suavização exponencial de Holt (E). Quando avaliados com a base de treino, o melhor REQM foi o do modelo C (45.49639) seguido do B (57.98060). Para 12 meses, o modelo B foi o que atingiu o melhor REQM (65.01274), seguido do A (77.17519) e em 24 meses o A teve o melhor desempenho quanto aos desvios (76.24949), seguido de E (79.13533). Quanto aos escores, o modelo E obteve os melhores escores tanto para 12 quanto para 24 meses (382.41077 e 481.29854, respectivamente) seguido do modelo B (405.02937 e 572.78467). A análise dos gráficos evidencia mais uma vez o bom ajuste dos modelos. Dentre os ajustados, pode-se utilizar qualquer um dos modelos A, B ou E com eficácia similar. Contudo, no uso para tomada de decisão, sugere-se a adoção do modelo A, por ter uma banda de confiança mais ampla e ser mais simples que as alternativas.
+
+### Metotrexato (injetável)
+
+Os modelos ajustados para metotrexato injetável tiveram desempenhos parecidos, com a média dos REQM para a base de teste = 8.678859 e desvio padrão 0.2136133, sendo o modelo A (ARIMA(1,1,0) w/ drift) o menor (8.541955). Em 12 meses o modelo F (suavização exponencial com erros multiplicativos) teve o melhor REQM (25.79564), enquanto A e B (ARIMA(0,1,0) w/ drift) ficaram em média = 29.93059; o cenário se inverteu para 24 meses, em que A e B ficaram em torno de 28.44764 e F passou de 30. Quanto ao escore, o modelo B obteve os melhores escores para os dois periodos: 110.86201 para 12 meses, seguido de 124.77368 para o modelo A; e 139.92883 para 24 seguido também pelo modelo A com 148.91759. Isto posto, bem como a análise dos gráficos, sugere que o modelo B seja o mais recomendado para a predição do número de pacientes de espondilite tratados com metotrexato injetável.
+
+### Metotrexato (oral)
+
+A forma oral de metotrexato teve quatro modelos com bom desempenho. O modelo C (LM w/ ARIMA(1,0,2) errors), contudo, só teve  REQMs melhores que as alternativas nos períodos de teste (29.26052) e 24 meses (118.7575). Por outro lado, obteve escores mais altos que os modelos A (ARIMA(1,1,0) w/ drift) e E (suavização exponencial de Holt). Para 12 meses, o modelo F (suavização exponencial com erros multiplicativos) teve o REQM mais baixo (89.83984), seguido de E (97.86588). Por fim, os melhores escores para 12 e 24 meses foram dos modelos E (300.36820) e A (443.2224), respectivamente. O modelo C, apesar de ter bom REQM para 24 meses, depende de informações que não estão disponíveis no momento da predição e teria de recorrer ao uso de uma predição do número total de pacientes no período, aumentando a incerteza. Pela análise da tabela e dos gráficos, conclui-se que tanto o modelo A quanto o E poderiam servir para a predição da série de metotrexato oral. A suavização exponencial de Holt teve métricas melhores que as de A, mas seus desempenhos são próximos o suficiente dada a grandeza dos dados modelados.
+
+### Secuquinumabe
+
+Dada a escassez de dados para secuquinumabe, a modelagem também foi restrita. Ainda que dois modelos tenham sido ajustados, o ideal para a modelagem seria a obtenção de dados mais recentes, totalizando pelo menos 50 observações. Isto posto, o modelo A (ARIMA(1,1,0) w/ drift) estimou melhor a média da série que o modelo B (ARIMA(0,1,0) w/ drift), enquanto este teve melhores escores. Ainda que as métricas apontem para o uso do modelo B, o primeiro modelo contém os dados observados com maior margem, o que é interessante dada a escassez de dados. Reitera-se que há a necessidade de uma nova modelagem utilizando um volume mais expressivo de dados.
+
+```{r}
+save.image(file = "M45.RData") 
+```
+
+
+# Conclusões
+
+Sugere-se a adoção do modelo D para a demanda total (suavização exponencial com erros multiplicativos). 
+
+Para adalimumabe, prefere-se adotar o modelo B (ARIMA(1,1,1)(1,0,0)[12] w/ drift). Apesar de haver modelos que atingiram métricas melhores durante a análise de resíduos, o modelo B é mais simples que o C (LM com erros ARIMA) e não depende de valores desconhecidos de número total de pacientes.
+
+Os modelos ajustados para certolizumabe pegol podem não ser satisfatórios devido ao curto período disponível para o ajuste. O ideal neste caso seria ajustar os modelos com dados novos a fim de reavaliá-los.
+
+Para etanercepte, tanto o modelo B (ARIMA(1,2,1)) quanto o E (Holt linear) tiveram bons ajustes. Contudo, recomenda-se o uso do modelo B pois este se aproximou melhor dos dados observados e tem um intervalo preditivo mais amplo, abarcando uma gama maior de valores possíveis, o que pode ser vantajoso dada a incerteza inerente ao processo de predição.
+
+O modelo com melhores métricas para a estimativa de golimumabe foi a suavização exponencial de Holt (E). Apesar de um curto período disponível para o treino (somente 32 observações), o modelo E foi capaz de predizer o comportamento nos 24 meses seguintes.
+
+Infliximabe teve bons ajustes para vários modelos, mas se destaca o modelo A (ARIMA(1,1,0) w/ drift) no que se refere a desvios para 24 meses e simplicidade do modelo. Obteve também um bom escore para ambos os intervalos de 12 e 24 meses, ficando atrás somente do modelo E. Este modelo (suavização exponencial de Holt) também pode ser utilizado, porém, têm intervalo preditivo mais estreito.
+
+Para a predição da série de metotrexato injetável, sugere-se o uso de ARIMA(0,1,0) w/ drift (B). O modelo teve os melhores escores para o periodo de validação, bem como os REQMs. O modelo proposto A (ARIMA(1,1,0) w/ drift) também teve um desempenho satisfatório, muito próximo ao de B, e poderia ser usado da mesma forma.
+
+A série de metotrexato oral pode ser estimada tão bem com o modelo E (suavização exponencial de Holt) quanto pelo modelo A (ARIMA(1,1,0) w/ drift). Ambos têm métricas bastante parecidas, principalmente no que se refere a REQMs. Qualquer um dos dois poderia ser utilizado na estimativa da série.
+
+Secuquinumabe tem somente 39 meses de observações nos dados, ainda assim, os melhores modelos ajustados foram A (ARIMA(1,1,0) w/ drift) e B (ARIMA(0,1,0) w/ drift). O modelo preferido entre eles foi o A, por ter intervalo preditivo maior que B, ao mesmo tempo que apresentou melhor ajuste da média. Isto posto, é interessante realizar novos ajustes com maior volume de dados.
