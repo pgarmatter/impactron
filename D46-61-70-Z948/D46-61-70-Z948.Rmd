@@ -110,6 +110,7 @@ O modelo linear simples teve o melhor AIC (1116.364) para a base de treino até 
 # Análise de resíduos
 
 ```{r}
+nb.label = "F"
 newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
 
 cast <- models %>% 
@@ -122,7 +123,7 @@ nb.var = var(soma$qt_total_usuarios) #var da serie
 size = nb.mean^2 /(nb.var - nb.mean)
 prob = nb.mean / nb.var
 
-nb.cast = fable(.model = 'F',
+nb.cast = fable(.model = nb.label,
                 ano_mes = unique(cast$ano_mes),
                 qt_total_usuarios = dist_negative_binomial(size, prob),
                 mean = nb.cast,
@@ -159,42 +160,131 @@ A análise das métricas nos levaria a decidir por utilizar o MAN para a modelag
 Supõe-se que uma modelagem com mais dados, incluindo informações sobre o último aumento no número de pacientes, gere modelos melhores. Para tal, foram adicionados os 12 meses seguintes à análise.
 
 ```{r}
+nb.label = 'F'
 soma.treino <- soma %>% filter(ano_mes < yearmonth("2021/06"))
 
 models <- soma.treino %>% 
   model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
         B = ARIMA(qt_total_usuarios),
         C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
-        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")))
+        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")), 
+        E = TSLM(qt_total_usuarios ~ ano_mes))
 
-glance(models) %>% 
+(aics <- glance(models) %>% 
   select(.model, AIC) %>% 
-  arrange(AIC) 
+  bind_rows(data.frame(.model = c(nb.label), AIC = c(AIC(binomialneg)))) )
 ```
 
 A relação entre os AICs se manteve.
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2021/06"))
 
-cast <- models %>% 
+
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-cast %>% 
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = nb.label,
+                ano_mes = unique(cast.12$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast.12 <- cast.12 %>%
+  bind_rows(nb.cast)
+
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+nb.cast = predict.glm(binomialneg, newdata, type="response")
+nb.mean = nb.cast #uma por mes
+nb.var = var(soma$qt_total_usuarios) 
+
+size = nb.mean^2 /(nb.var - nb.mean)
+prob = nb.mean / nb.var
+
+nb.cast = fable(.model = nb.label,
+                ano_mes = unique(cast.24$ano_mes),
+                qt_total_usuarios = dist_negative_binomial(size, prob),
+                mean = nb.cast,
+                d1 = c(NA, diff(nb.cast)),
+                response = 'qt_total_usuarios',
+                distribution = 'qt_total_usuarios')
+
+cast.24 <- cast.24 %>%
+  bind_rows(nb.cast)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
 No caso da modelagem com mais dados, o modelo de Holt teve o menor REQM (28.71395) e o segundo melhor escore (460.6574). Por outro lado, o ARIMA selecionado pelo método (ARIMA(2,0,0)(2,0,0)[12] com média) teve o pior REQM (82.12612), mas o melhor escore (364.5074)
 
 ```{r}
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
   facet_wrap(~ .model, scales = "free") 
 ```
 
-Frente à inserção dos doze meses subsequentes à primeira análise, foram obtidos modelos melhores, com exceção do ARIMA automático. O MAN manteve-se um bom candidato. Apesar de ter escore pior que o AAN para este caso, a incerteza inerente ao processo de predição de número de pacientes justificaria o uso do MAN para a predição, uma vez que se mostrou mais versátil para esta série temporal.
+Frente à inserção dos doze meses subsequentes à primeira análise, foram obtidos modelos melhores, com exceção do ARIMA automático. O AAN tem ajuste melhor tanto na média quanto no intervalo preditivo.
 
 ```{r}
 save.image('D46-61-70-Z948.RData')
