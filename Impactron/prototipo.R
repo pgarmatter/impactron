@@ -184,9 +184,13 @@ server <- function(input, output, session) {
     }
     
     if(!is.null(envs[[cid]])){
-      with(envs[[cid]],
-        c("Demanda total", (tratamentos %>% distinct(no_serie))$no_serie)
-      )
+      with(envs[[cid]],{
+        if(length(unique(tratamentos$key)) > 1){
+          c("Demanda total", (tratamentos %>% distinct(no_serie))$no_serie)
+        }else{
+          c("Demanda total")
+        }
+      })
     }else{
       c("Selecione o PCDT")
     }
