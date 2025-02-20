@@ -290,7 +290,7 @@ server <- function(input, output, session) {
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
   
   output$modelos = renderTable({
-    print('atualizando tabela m.nomes')
+    # print('atualizando tabela m.nomes')
     m.nomes() %>% 
       select(!starts_with('key')) %>% 
       as_tibble() %>% 
@@ -350,10 +350,31 @@ server <- function(input, output, session) {
   forecast.data = reactive({
     meses = min(max(input$meses, 0), 60)
     
-    # chavear entre modelos caso necessário (STL)
-    ((m.nomes() %>%
-        filter(modelo == input$s.model))$model_spec_mdl %>%
-      forecast(h = meses))
+    # chavear entre modelos caso necessário (STL, nb)
+    modelo = (m.nomes() %>%
+        filter(modelo == input$s.model))$model_spec_mdl[[1]]
+        
+    response = modelo$response[[1]]
+    
+    newdata = data() %>%
+      append_row(data(), n = meses) %>%
+      fill(everything()) %>%
+      filter(ano_mes > max(data()$ano_mes))
+    
+    switch(modelo$model$model,
+      'dcmp_mdl'={
+        modelo = data() %>% 
+          model(modelo$model)
+      },
+      {
+        modelo = modelo %>% 
+          refit(data())
+      }
+    )
+
+    modelo %>% 
+      forecast(new_data = newdata) %>% 
+      select(any_of(response), .mean)
   }) %>%
     bindEvent(input$forecast)
   
@@ -374,10 +395,10 @@ server <- function(input, output, session) {
   }) %>% bindEvent(input$forecast, ignoreNULL = F)
   
   output$forecast.graficos.plot = renderPlot({
-    forecast.data()[[1]] %>%
+    forecast.data()%>%
       autoplot(data() %>% select(starts_with('qt_'))) +
       scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
-      geom_vline(xintercept = as.Date(max(t.data()$ano_mes) + seq(12, min(max(input$meses, 0), 60), 12)), colour = "red") +
+      geom_vline(xintercept = as.Date(max(data()$ano_mes) + seq(12, min(max(input$meses, 0), 60), 12)), colour = "red") +
       theme(legend.position="none") +
       labs(caption = "linhas verticais representam intervalos de 12 meses de predição.",
            y = "número de pacientes")
@@ -385,7 +406,7 @@ server <- function(input, output, session) {
     bindEvent(input$forecast)
   
   output$forecast.tabela = renderTable({
-    forecast.data()[[1]] %>%
+    forecast.data() %>%
       as_tibble() %>%
       rename(qt_usuarios = starts_with('qt_')) %>%
       mutate(

@@ -11,16 +11,16 @@ with(e.ea, {
     autoplot(meds) +
     facet_wrap(~key +.model, scales = "free")
 
-## STL
-#   meds %>%
-#     filter(key == meds$key[1]) %>%
-#     model(meds.models$D[[1]]$model) %>% forecast(newdata) %>%
-#     autoplot(meds %>% filter(key == meds$key[1]))
-  
-  # meds %>%
-  #   model(meds.models$D[[1]]$model) %>% 
-  #   forecast(newdata) %>%
-  #   autoplot(meds %>% filter(key == meds$key[1]))
-  # 
+# STL
+  meds %>%
+    filter(key == meds$key[1]) %>%
+    model(meds.models$D[[1]]$model) %>% forecast(newdata) %>%
+    autoplot(meds %>% filter(key == meds$key[1]))
+
+  meds %>%
+    model(meds.models$D[[1]]$model) %>%
+    forecast(newdata) %>%
+    autoplot(meds %>% filter(key == meds$key[1]))
+
 })
 
