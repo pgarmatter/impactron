@@ -363,7 +363,7 @@ server <- function(input, output, session) {
     }else{
       "Gráfico de pacientes preditos"
     }
-  })
+  }) %>% bindEvent(input$forecast, ignoreNULL = F)
   
   output$forecast.tabela.title = renderText({
     if(input$droga != ''){
@@ -371,7 +371,7 @@ server <- function(input, output, session) {
     }else{
       "Números preditos de pacientes"
     }
-  })
+  }) %>% bindEvent(input$forecast, ignoreNULL = F)
   
   output$forecast.graficos.plot = renderPlot({
     forecast.data()[[1]] %>%
@@ -379,7 +379,7 @@ server <- function(input, output, session) {
       scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
       geom_vline(xintercept = as.Date(max(t.data()$ano_mes) + seq(12, min(max(input$meses, 0), 60), 12)), colour = "red") +
       theme(legend.position="none") +
-      labs(caption = "linhas verticais representam intervalos de meses de predição.",
+      labs(caption = "linhas verticais representam intervalos de 12 meses de predição.",
            y = "número de pacientes")
   }) %>% 
     bindEvent(input$forecast)
