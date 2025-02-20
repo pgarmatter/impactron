@@ -27,12 +27,8 @@ library(splines)
 library(patchwork)
 library(distributional)
 
-# setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/M45")
-# load("M45.RData")
-
 select <- dplyr::select
 
-# pcdts <- tibble(cid = c('','M33', 'M45'), nome = c('','Dermatomiosite E Polimiosite','Espondilite Ancilosante'))
 pcdts <- read.csv2('pcdts.csv')
 cid <- ''
 series <- c()
@@ -143,7 +139,7 @@ ui <- page_sidebar(
         width = 600,
         heigth = 600,
         card(height = .5, full_screen = T, card_header(textOutput("forecast.graficos.title")), card_body(uiOutput(outputId ="forecast.graficos"))),
-        card(height = .5, full_screen = T, card_body(tableOutput("forecast.tabela")))
+        card(height = .5, full_screen = T, card_header(textOutput("forecast.tabela.title")), card_body(tableOutput("forecast.tabela")))
       )
     )
   )
@@ -355,9 +351,9 @@ server <- function(input, output, session) {
     meses = min(max(input$meses, 0), 60)
     
     # chavear entre modelos caso necessário (STL)
-    (m.nomes() %>%
-       filter(modelo == input$s.model))$model_spec_mdl %>%
-      forecast(h = meses)
+    ((m.nomes() %>%
+        filter(modelo == input$s.model))$model_spec_mdl %>%
+      forecast(h = meses))
   }) %>%
     bindEvent(input$forecast)
   
@@ -369,9 +365,17 @@ server <- function(input, output, session) {
     }
   })
   
+  output$forecast.tabela.title = renderText({
+    if(input$droga != ''){
+      paste("Números preditos de pacientes para", input$droga)
+    }else{
+      "Números preditos de pacientes"
+    }
+  })
+  
   output$forecast.graficos.plot = renderPlot({
-    forecast.data() %>%
-      autoplot(data()) +
+    forecast.data()[[1]] %>%
+      autoplot(data() %>% select(starts_with('qt_'))) +
       scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
       geom_vline(xintercept = as.Date(max(t.data()$ano_mes) + seq(12, min(max(input$meses, 0), 60), 12)), colour = "red") +
       theme(legend.position="none") +
