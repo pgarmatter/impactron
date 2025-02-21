@@ -24,3 +24,10 @@ with(e.ea, {
 
 })
 
+with(e.ea, {
+  models %>% pivot_longer(everything(), names_to = nome, values_to = modelo)
+  for (m in models$model){
+    m %>% print()
+  }
+    
+})

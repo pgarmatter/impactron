@@ -108,7 +108,9 @@ ui <- page_sidebar(
       card(card_header('Gráficos'), 
            card_body(plotOutput("modelos.graficos")),
            min_height = 500)
-      # uiOutput("modelos.graficos")
+      # card(card_header('Resíduos'), 
+      #      card_body(plotOutput("modelos.graficos.residuos")),
+      #      min_height = 500)
     ),
     nav_panel(
       title = "Estimativas",
@@ -136,10 +138,11 @@ ui <- page_sidebar(
         )
       ),
       layout_column_wrap(
-        width = 600,
-        heigth = 600,
-        card(height = .5, full_screen = T, card_header(textOutput("forecast.graficos.title")), card_body(uiOutput(outputId ="forecast.graficos"))),
-        card(height = .5, full_screen = T, card_header(textOutput("forecast.tabela.title")), card_body(tableOutput("forecast.tabela")))
+        width = '600px',
+        heights_equal = 'row',
+        fillable = F,
+        card(min_height = 500, full_screen = T, card_header(textOutput("forecast.graficos.title")), card_body(uiOutput(outputId ="forecast.graficos"))),
+        card(min_height = 500, full_screen = T, card_header(textOutput("forecast.tabela.title")), card_body(tableOutput("forecast.tabela")))
       )
     )
   )
@@ -331,6 +334,10 @@ server <- function(input, output, session) {
       labs(title = paste("Modelos ajustados para ", input$droga),
          caption = "linhas verticais representam 12 e 24 meses de predição.",
          y = "número de pacientes")
+  })
+  
+  output$modelos.graficos.residuos = renderPlot({
+    # m.nomes() %>% autoplot()
   })
 
   #### ESTIMATIVAS
