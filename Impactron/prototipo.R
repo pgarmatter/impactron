@@ -93,7 +93,6 @@ ui <- page_sidebar(
       tableOutput('stats'),
       layout_column_wrap(
         width = 400,
-        heigth = 400,
         card(card_header('Série temporal'), card_body(plotOutput("ts"))),
         card(card_header('Periodograma acumulado'), card_body(plotOutput("cpgram"))),
         card(card_header('FAC'), card_body(plotOutput("acf"))),
@@ -105,12 +104,8 @@ ui <- page_sidebar(
       title = "Modelos",
       tableOutput("modelos"),
       htmlOutput("accuracy"),
-      card(card_header('Gráficos'), 
-           card_body(plotOutput("modelos.graficos")),
-           min_height = 500)
-      # card(card_header('Resíduos'), 
-      #      card_body(plotOutput("modelos.graficos.residuos")),
-      #      min_height = 500)
+      uiOutput("modelos.graficos", fill = T),
+      uiOutput("modelos.graficos.residuos", fill = T)
     ),
     nav_panel(
       title = "Estimativas",
@@ -138,7 +133,8 @@ ui <- page_sidebar(
         )
       ),
       layout_column_wrap(
-        width = '600px',
+        width = 600,
+        height = 600,
         heights_equal = 'row',
         fillable = F,
         card(min_height = 500, full_screen = T, card_header(textOutput("forecast.graficos.title")), card_body(uiOutput(outputId ="forecast.graficos"))),
@@ -316,28 +312,54 @@ server <- function(input, output, session) {
       column_spec(7, bold = boldmap$winkler.24) 
   })
   
-  output$modelos.graficos = renderPlot({
+  output$modelos.graficos = renderUI({
     newdata = data() %>% 
       filter(ano_mes > max(t.data()$ano_mes), ano_mes <= max(t.data()$ano_mes) + 24)
     if(input$droga == series()[1] || !exists('meds.models')){
       newdata = newdata %>% select(-qt_usuarios)
     }
  
-    m.data() %>%
+    g <- m.data() %>%
       forecast(new_data = newdata) %>%
       filter(!is.na(.mean)) %>%
-      autoplot(data()) +
-      facet_wrap( ~ .model, scales = "free") +
-      scale_x_yearmonth(date_breaks = '2 years', date_labels='%Y') +
-      geom_vline(xintercept = as.Date(max(t.data()$ano_mes) + c(12, 24)), colour = "red") +
-      theme(legend.position="none") +
-      labs(title = paste("Modelos ajustados para ", input$droga),
-         caption = "linhas verticais representam 12 e 24 meses de predição.",
-         y = "número de pacientes")
+      split(.$.model) %>% 
+      map(~autoplot(., data()) +
+        scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
+        geom_vline(xintercept = as.Date(max(t.data()$ano_mes) + c(12, 24)), colour = "red") +
+        theme(legend.position="none") +
+        labs(caption = "linhas verticais representam 12 e 24 meses de predição.",
+             y = "número de pacientes"))
+    
+    cards <- lapply(names(g), g_ = g, function(g_, i) {
+      card(card_header(paste("Predição de 24 meses com ", (m.nomes() %>% filter(nome == i))$modelo)), 
+           card_body(renderPlot(g_[[i]])), #, outputArgs = list(inline = F)
+           full_screen = T)
+    })
+    
+    do.call(layout_column_wrap, c(list(
+      width = 400,
+      heights_equal = 'row',
+      fill = F),
+      cards))
   })
   
-  output$modelos.graficos.residuos = renderPlot({
-    # m.nomes() %>% autoplot()
+  output$modelos.graficos.residuos = renderUI({
+    g <- m.data() %>% 
+      pivot_longer(everything(), names_to = 'modelo') %>% 
+      split(~modelo) %>% 
+      map(~gg_tsresiduals(.))
+    
+    cards <- lapply(names(g), g_ = g, function(g_, i) {
+      card(card_header(paste("Análise de resíduos para ", (m.nomes() %>% filter(nome == i))$modelo)), 
+           card_body(renderPlot(g_[[i]])), #, outputArgs = list(inline = F)
+           full_screen = T)
+    })
+    
+    do.call(layout_column_wrap, c(list(
+      width = 400,
+      heights_equal = 'row',
+      fill = F),
+      cards))
   })
 
   #### ESTIMATIVAS

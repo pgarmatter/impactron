@@ -24,10 +24,31 @@ with(e.ea, {
 
 })
 
+
 with(e.ea, {
-  models %>% pivot_longer(everything(), names_to = nome, values_to = modelo)
-  for (m in models$model){
-    m %>% print()
-  }
-    
+  models %>%
+    pivot_longer(everything(),
+                 names_to = '.model',
+                 values_to = 'modelo') %>% 
+    split(.$.model) %>%
+    map(
+      ~ plotOutput(outputId = paste0("modelos.graficos.dados$", .$.model))
+    )
+}) 
+
+with(e.ea, { 
+  models %>%
+    forecast(h = 12) %>%
+    split(.$.model) %>%
+    map(
+      ~ autoplot(., soma) +
+        scale_x_yearmonth(date_breaks = '2 years', date_labels = '%Y') +
+        geom_vline(xintercept = as.Date(max(soma.treino$ano_mes) + c(12, 24)), colour = "red") +
+        theme(legend.position = "none") +
+        labs(title = .$.model,
+             caption = "linhas verticais representam 12 e 24 meses de predição.",
+             y = "número de pacientes")
+    )
+  
+  
 })
