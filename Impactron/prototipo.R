@@ -261,14 +261,6 @@ server <- function(input, output, session) {
     })
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F, ignoreNULL = T)
   
-  # m.nomes <- reactive({
-  #   m.data() %>% pivot_longer(cols = !starts_with('key'),
-  #                      names_to = 'nome',
-  #                      values_to = 'model_spec_mdl') %>%
-  #     mutate(modelo = modelName(format(model_spec_mdl))) %>% 
-  #     column_to_rownames(var="modelo")
-  # })
-  
   m.nomes <- reactive({
     m.data() %>% pivot_longer(
       cols = !starts_with('key'),
@@ -289,7 +281,6 @@ server <- function(input, output, session) {
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
   
   output$modelos = renderTable({
-    # print('atualizando tabela m.nomes')
     m.nomes() %>% 
       select(!starts_with('key')) %>% 
       as_tibble() %>% 
@@ -379,7 +370,6 @@ server <- function(input, output, session) {
   forecast.data = reactive({
     meses = min(max(input$meses, 0), 60)
     
-    # chavear entre modelos caso necessário (STL, nb)
     modelo = (m.nomes() %>%
         filter(modelo == input$s.model))$model_spec_mdl[[1]]
         
