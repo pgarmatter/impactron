@@ -104,8 +104,7 @@ ui <- page_sidebar(
       title = "Modelos",
       tableOutput("modelos"),
       htmlOutput("accuracy"),
-      uiOutput("modelos.graficos", fill = T),
-      uiOutput("modelos.graficos.residuos", fill = T)
+      uiOutput("modelos.graficos", fill = T)
     ),
     nav_panel(
       title = "Estimativas",
@@ -137,8 +136,8 @@ ui <- page_sidebar(
         height = 600,
         heights_equal = 'row',
         fillable = F,
-        card(min_height = 500, full_screen = T, card_header(textOutput("forecast.graficos.title")), card_body(uiOutput(outputId ="forecast.graficos"))),
-        card(min_height = 500, full_screen = T, card_header(textOutput("forecast.tabela.title")), card_body(tableOutput("forecast.tabela")))
+        card(full_screen = T, card_header(textOutput("forecast.graficos.title")), card_body(uiOutput(outputId ="forecast.graficos"))),
+        card(full_screen = T, card_header(textOutput("forecast.tabela.title")), card_body(tableOutput("forecast.tabela")))
       )
     )
   )
@@ -303,38 +302,34 @@ server <- function(input, output, session) {
       column_spec(7, bold = boldmap$winkler.24) 
   })
   
-  output$modelos.graficos = renderUI({
+  modelos.g.validacao = reactive({
     newdata = data() %>% 
       filter(ano_mes > max(t.data()$ano_mes), ano_mes <= max(t.data()$ano_mes) + 24)
     if(input$droga == series()[1] || !exists('meds.models')){
       newdata = newdata %>% select(-qt_usuarios)
     }
- 
+    
     g <- m.data() %>%
       forecast(new_data = newdata) %>%
       filter(!is.na(.mean)) %>%
       split(.$.model) %>% 
       map(~autoplot(., data()) +
-        scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
-        geom_vline(xintercept = as.Date(max(t.data()$ano_mes) + c(12, 24)), colour = "red") +
-        theme(legend.position="none") +
-        labs(caption = "linhas verticais representam 12 e 24 meses de predição.",
-             y = "número de pacientes"))
+            scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
+            geom_vline(xintercept = as.Date(max(t.data()$ano_mes) + c(12, 24)), colour = "red") +
+            theme(legend.position="none") +
+            labs(caption = "linhas verticais representam 12 e 24 meses de predição.",
+                 y = "número de pacientes"))
     
     cards <- lapply(names(g), g_ = g, function(g_, i) {
       card(card_header(paste("Predição de 24 meses com ", (m.nomes() %>% filter(nome == i))$modelo)), 
-           card_body(renderPlot(g_[[i]])), #, outputArgs = list(inline = F)
+           card_body(renderPlot(g_[[i]])),
            full_screen = T)
     })
     
-    do.call(layout_column_wrap, c(list(
-      width = 400,
-      heights_equal = 'row',
-      fill = F),
-      cards))
+    cards
   })
   
-  output$modelos.graficos.residuos = renderUI({
+  modelos.g.residuos = reactive({
     g <- m.data() %>% 
       pivot_longer(everything(), names_to = 'modelo') %>% 
       split(~modelo) %>% 
@@ -345,12 +340,18 @@ server <- function(input, output, session) {
            card_body(renderPlot(g_[[i]])), #, outputArgs = list(inline = F)
            full_screen = T)
     })
-    
+
+    cards
+  })
+  
+  output$modelos.graficos = renderUI({
     do.call(layout_column_wrap, c(list(
       width = 400,
       heights_equal = 'row',
       fill = F),
-      cards))
+      modelos.g.validacao(), 
+      modelos.g.residuos()
+      ))
   })
 
   #### ESTIMATIVAS
@@ -363,7 +364,7 @@ server <- function(input, output, session) {
       return(h3('Selecione um modelo e um período (meses) para estimar.'))
     }
     
-    return(plotOutput(outputId = "forecast.graficos.plot")) #, width = 500, height = 400
+    return(plotOutput(outputId = "forecast.graficos.plot"))
   }) %>%
     bindEvent(input$forecast)
   
