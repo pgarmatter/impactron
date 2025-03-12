@@ -14,6 +14,8 @@ require(xtable)
 # 
 # library(microdatasus)
 
+library(shinytest2)
+
 library(kableExtra)
 
 library(fpp3)
