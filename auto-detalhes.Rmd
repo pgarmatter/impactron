@@ -1,0 +1,64 @@
+---
+title: "autodetalhes"
+author: "Pietro Garmatter"
+date: "2025-01-10"
+output: latex_fragment
+---
+
+# COMENTÁRIOS SOBRE COMPORTAMENTO
+
+```{r,  message = F,warning=FALSE, echo=F }
+library(fpp3)
+library(tidyverse)
+library(DBI)
+library(GGally)
+library(ggdist)
+library(ggfortify)
+library(MASS)
+library(splines)
+library(patchwork)
+library(distributional)
+library(kableExtra)
+setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/M45")
+load("M45.RData")
+select <- dplyr::select
+
+CID = 'M45'
+d.nome = 'espondilite ancilosante'
+
+i = unique(meds$key)[5]
+
+ttos <- data.frame(
+  row.names = unique(meds$key),
+  key = unique(meds$key),
+  nome = c(
+    'adalimumabe',
+    'certolizumabe pegol',
+    'etanercepte',
+    'golimumabe',
+    'infliximabe',
+    'metotrexato injetável',
+    'metotrexato oral',
+    'secuquinumabe'
+  ),
+  sigla = c('adal', 'cert', 'etan', 'goli', 'infl', 'metoi', 'metoo', 'secu')
+)
+
+knitr::opts_chunk$set(echo = F)
+```
+
+```{r comentarios-serie}
+
+```
+```{r comentarios-cpgram}
+com.cpgram = switch(sample(2, 1),
+  "A análise do periodograma acumulado da série (Figura REF) indica presença de componente sistemático a ser modelado.",
+  paste("A análise do periodograma acumulado da série", ttos[i,]$nome, "(Figura REF) indica presença de componente sistemático a ser modelado."))
+
+com.lb = switch(sample(2, 1),
+                "Constatação reforçada pelo teste Ljung-Box, que rejeita a hipótese nula de se tratar de ruído branco com p-valor 0.0000 para 12 e 24 meses de defasagem.",
+                "")
+```
+
+
+`r com.cpgram` `r com.lb`
