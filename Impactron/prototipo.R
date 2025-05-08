@@ -46,8 +46,8 @@ getkey <- function(nome_serie){
   })
 }
 
-modelName <- function(nome){
-  gsub('<|>','',nome) %>% 
+modelName <- Vectorize(function(nome, selecionado = F){
+  nome_ = gsub('<|>','',nome) %>% 
     gsub('w/', 'com', .) %>% 
     sub('mean', 'média', .) %>% 
     sub('TSLM', 'Modelo linear com componentes de séries temporais', .) %>% 
@@ -57,7 +57,12 @@ modelName <- function(nome){
     sub('ETS(A,A,N)', 'Suavização exponencial de Holt', ., fixed = T) %>% 
     sub('ETS(M,A,N)', 'Suavização exponencial de Holt com erros multiplicativos', ., fixed = T) %>% 
     sub('STL decomposition model', 'Modelo de decomposição em trend + remainder', .)
-}
+  if(selecionado){
+    paste('★', nome_)
+  }else{
+    nome_
+  }
+})
 
 valida <- function(nome, serie){
   if(nome == '' || !(nome %in% serie)){
@@ -260,13 +265,28 @@ server <- function(input, output, session) {
     })
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F, ignoreNULL = T)
   
+  m.select <- reactive({
+    with(envs[[cid]], {
+      if(exists("m.selecionados")){
+        key_ = ifelse(input$droga == series()[1] || !exists('meds.models'), 
+                      'Demanda total', 
+                      getkey(input$droga))
+        m.selecionados %>% filter(key == key_)
+      } else {
+        tibble(key = 'invalid', nome = 'invalid')
+      }
+    })
+  })
+  
   m.nomes <- reactive({
     m.data() %>% pivot_longer(
       cols = !starts_with('key'),
       names_to = 'nome',
       values_to = 'model_spec_mdl'
-    ) %>%
-      mutate(modelo = modelName(format(model_spec_mdl)))
+    ) %>% 
+      left_join(m.select()) %>%
+      mutate(selecionado = !is.na(key)) %>% 
+      mutate(modelo = modelName(format(model_spec_mdl), selecionado))
   })
   
   f.acc <- reactive({
@@ -283,7 +303,7 @@ server <- function(input, output, session) {
     m.nomes() %>% 
       select(!starts_with('key')) %>% 
       as_tibble() %>% 
-      select(-model_spec_mdl) 
+      select(nome, modelo) 
   })
   
   output$accuracy = renderText({
@@ -356,7 +376,7 @@ server <- function(input, output, session) {
 
   #### ESTIMATIVAS
   observe({
-    updateSelectInput(session, "s.model", "Modelos", choices = m.nomes()$modelo)
+    updateSelectInput(session, "s.model", "Modelos", choices = unname(m.nomes()$modelo))
   })
   
   output$forecast.graficos = renderUI({

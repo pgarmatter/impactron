@@ -11,7 +11,6 @@ html_document: default
 setwd("E:/GEATS/Estimador-AIO-SUS/D46-61-70-Z948/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
@@ -284,7 +283,12 @@ cast.24 %>%
   facet_wrap(~ .model, scales = "free") 
 ```
 
-Frente à inserção dos doze meses subsequentes à primeira análise, foram obtidos modelos melhores, com exceção do ARIMA automático. O AAN tem ajuste melhor tanto na média quanto no intervalo preditivo.
+Frente à inserção dos doze meses subsequentes à primeira análise, foram obtidos modelos melhores, com exceção do ARIMA automático. O AAN tem ajuste melhor tanto na média quanto no intervalo preditivo (C).
+
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome='C')
+```
+
 
 ```{r}
 save.image('D46-61-70-Z948.RData')
