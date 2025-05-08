@@ -107,6 +107,7 @@ ui <- page_sidebar(
     ),
     nav_panel(
       title = "Modelos",
+      textOutput("aviso.modelos"),
       tableOutput("modelos"),
       htmlOutput("accuracy"),
       uiOutput("modelos.graficos", fill = T)
@@ -299,6 +300,14 @@ server <- function(input, output, session) {
     })
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
   
+  output$aviso.modelos = renderText({
+    if(any(m.nomes()$selecionado)){
+      "O modelo sugerido é indicado com ★."
+    }else{
+      ""
+    }
+  }) 
+
   output$modelos = renderTable({
     m.nomes() %>% 
       select(!starts_with('key')) %>% 
