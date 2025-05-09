@@ -107,8 +107,9 @@ ui <- page_sidebar(
     ),
     nav_panel(
       title = "Modelos",
-      textOutput("aviso.modelos"),
       tableOutput("modelos"),
+      textOutput("aviso.modelos"),
+      hr(style = "margin: 1px"),
       htmlOutput("accuracy"),
       uiOutput("modelos.graficos", fill = T)
     ),
@@ -277,7 +278,7 @@ server <- function(input, output, session) {
         tibble(key = 'invalid', nome = 'invalid')
       }
     })
-  })
+  }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F, ignoreNULL = T)
   
   m.nomes <- reactive({
     m.data() %>% pivot_longer(
@@ -301,11 +302,7 @@ server <- function(input, output, session) {
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
   
   output$aviso.modelos = renderText({
-    if(any(m.nomes()$selecionado)){
-      "O modelo sugerido é indicado com ★."
-    }else{
-      ""
-    }
+    ifelse(any(m.nomes()$selecionado), "O modelo sugerido é indicado com ★.","")
   }) 
 
   output$modelos = renderTable({
