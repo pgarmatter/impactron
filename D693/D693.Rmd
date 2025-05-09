@@ -6,19 +6,13 @@ output: html_document
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/D693/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/D693/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -145,7 +139,7 @@ cast %>%
 Para Púrpura Trombocitopênica Idiopática, a modelagem com menor escore de winkler foi o ARIMA 111 com drift (segundo em REQM). Holt ficou em terceiro para REQM, atrás de LM e ARIMA 111, e segundo para winkler (atrás somente do ARIMA 111 com drift).
 
 ```{r}
-models$arima
+models$B
 ```
 
 O arima automatico ajustou o modelo proposto pela análise da ACF e da PACF, ao modelo manual foi adicionado drift. (Como avaliar a necessidade de drift nos dados? Estacionaridade da diferenciada?). O modelo com erros multiplicativos teve o dobro de erro que o AAN. O modelo linear, apesar de bom REQM (menor de todos), apresentou o maior escore winkler, sendo descartado.
@@ -162,8 +156,75 @@ cast %>%
 
 ```
 
-O ARIMA automático (111 sem drift) se assemelha muito de um naive com erros acumulados, mantendo a média estacionária. O ARIMA 111 com drift teve um desempenho melhor que o sem drift. Diferente dos PCDTs anteriores, Púrpura Trombocitopênica Idiopática é melhor modelado por ARIMA 111 com drift. (Não avaliano nb e qp).
+O ARIMA automático (111 sem drift) se assemelha muito de um naive com erros acumulados, mantendo a média estacionária. O ARIMA 110 com drift teve um desempenho melhor que o 111 sem drift. Diferente dos PCDTs anteriores, Púrpura Trombocitopênica Idiopática é melhor modelado por ARIMA 110 com drift (A). (Não avaliano nb e qp).
 
+```{r}
+(aics <- glance(models) %>% 
+  select(.model, AIC))
+
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.12 <- cast.12 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
+```
+
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome='A')
+```
 
 ```{r}
 save.image('D693.RData')

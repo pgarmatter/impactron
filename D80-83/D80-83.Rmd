@@ -6,18 +6,13 @@ output: html_document
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/D80-83")
+# setwd("E:/GEATS/Estimador-AIO-SUS/D80-83")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -147,7 +142,7 @@ Melhor winkler score entre os modelos foi para AAN (erro e tendencia aditivos, s
 Como o score do MAN é quase o dobro do score de AAN, mas são próximos no REQM, prefere-se o AAN.
 
 ```{r}
-models$arima
+models$A
 ```
 
 O modelo selecionado automaticamente pelo ARIMA foi o ARIMA(0,1,0) com drift, que seria o equivalente a um drift (tendencia média da série) com erro ~Normal cumulativo.
@@ -163,9 +158,77 @@ cast %>%
   labs(title = "Estimativas de número de pacientes de Imunodeficiência Primária Com Predominância De Defeitos De Anticorpos no SUS", 
        subtitle = "a partir de 2020/06")
 ```
-Pelos gráficos, observa-se que as predições dos modelos AAN e arima (ARIMA(0,1,0) w/ drift) se ajustam bem ao comportamento observado após junho de 2020. O modelo MAN pode ser descartado, pela crescente incerteza após os primeiros 12 meses.
-A análise dos gráficos sugere que tanto o AAN quanto o ARIMA(0,1,0) com drift seriam úteis na predição de números futuros de pacientes para Imunodeficiência Primária Com Predominância De Defeitos De Anticorpos.
 
+Pelos gráficos, observa-se que as predições dos modelos AAN e arima (ARIMA(3,1,1) w/ drift) se ajustam bem ao comportamento observado após junho de 2020. O modelo MAN pode ser descartado, pela crescente incerteza após os primeiros 12 meses.
+A análise dos gráficos sugere que tanto o AAN quanto o ARIMA(3,1,1) com drift seriam úteis na predição de números futuros de pacientes para Imunodeficiência Primária Com Predominância De Defeitos De Anticorpos. (B e D)
+
+```{r}
+(aics <- glance(models) %>% 
+  select(.model, AIC))
+
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.12 <- cast.12 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
+```
+
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('B', 'D'))
+```
 
 ```{r}
 save.image('D80-83.RData')

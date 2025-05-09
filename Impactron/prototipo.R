@@ -29,7 +29,7 @@ library(distributional)
 
 select <- dplyr::select
 
-pcdts <- read.csv2('pcdts.csv')
+pcdts <- read.csv2('pcdts.csv') %>% arrange(nome)
 cid <- ''
 series <- c()
 envs <- list()
@@ -270,11 +270,13 @@ server <- function(input, output, session) {
   m.select <- reactive({
     with(envs[[cid]], {
       if(exists("m.selecionados")){
+        print(m.selecionados)
         key_ = ifelse(input$droga == series()[1] || !exists('meds.models'), 
                       'Demanda total', 
                       getkey(input$droga))
         m.selecionados %>% filter(key == key_)
       } else {
+        print('não há m.selecionados')
         tibble(key = 'invalid', nome = 'invalid')
       }
     })
@@ -302,8 +304,16 @@ server <- function(input, output, session) {
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
   
   output$aviso.modelos = renderText({
-    ifelse(any(m.nomes()$selecionado), "O modelo sugerido é indicado com ★.","")
-  }) 
+    qt.select = sum(m.nomes()$selecionado)
+    if(qt.select == 0){
+      aviso = ''
+    }else if(qt.select == 1){
+      aviso = 'O modelo sugerido é indicado com ★.'
+    }else{
+      aviso = 'Os modelos sugeridos são indicados com ★.'
+    }
+    aviso
+  }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F, ignoreNULL = T)
 
   output$modelos = renderTable({
     m.nomes() %>% 

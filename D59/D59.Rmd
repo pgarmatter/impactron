@@ -6,21 +6,15 @@ output: html_document
 ---
 
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/D59")
+# setwd("E:/GEATS/Estimador-AIO-SUS/D59")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
-
 
 load("D59.RData")
 
@@ -130,7 +124,7 @@ binomialneg.cast = predict.glm(binomialneg, newdata = newdata, type = 'response'
 ```
 
 ```{r}
-report(models$lm[[1]])
+report(models$E[[1]])
 ```
 
 ```{r}
@@ -179,9 +173,77 @@ cast %>%
        subtitle = "a partir de 2020/06")
 
 ```
+
+```{r}
+(aics <- glance(models) %>% 
+  select(.model, AIC))
+
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.12 <- cast.12 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
+```
+
 Olhando os gráficos, o ARIMA115 parece muito com o naive, enquanto o Holt consegue capturar uma certa tendencia crescente e abarcar a maior incerteza no seu intervalo preditivo. Particularmente eu preferiria o Holt, mas o escore seria o suficiente para justificar a escolha?
 Faria sentido analisar outros intervalos para o treinamento? Predições de 12 e 24 meses são as maiores que podem ser validadas para bases de treino até 2020/06
 
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome='C')
+```
 
 ```{r}
 save.image('D59.RData')
