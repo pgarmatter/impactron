@@ -217,7 +217,8 @@ server <- function(input, output, session) {
     # ver como fazer com kable (html)
     data() %>%
     as_tibble %>%
-    summarise(mínimo = min(qt_usuarios),
+    summarise("#observações" = n(),
+              mínimo = min(qt_usuarios),
               máximo = max(qt_usuarios),
               média = mean(qt_usuarios),
               mediana = median(qt_usuarios),
@@ -256,12 +257,16 @@ server <- function(input, output, session) {
   
   m.data <- reactive({
     with(envs[[cid]], {
-      if(input$droga == series()[1] || !exists('meds.models')){
-        m <- models
+      if(exists('models')){
+        if(input$droga == series()[1] || !exists('meds.models')){
+          m <- models
+        }else{
+          m <- meds.models %>% 
+            filter(key == getkey(input$droga))  
+            # select(!starts_with('key'))
+        }
       }else{
-        m <- meds.models %>% 
-          filter(key == getkey(input$droga))  
-          # select(!starts_with('key'))
+        m <- c()
       }
       m
     })
