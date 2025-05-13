@@ -8,10 +8,9 @@ output:
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/E740/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/E740/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
@@ -42,6 +41,10 @@ autoplot(soma, qt_total_usuarios) +
 Poucos dados para modelar. Dados começam em maio de 2021 e vão até maio de 2022. Poucos pacientes também.
 Não vejo sentido de modelar esse PCDT no momento.
 
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('none'))
+m.remodelar <- T
+```
 
 ```{r}
 save.image('E740.RData')

@@ -8,10 +8,9 @@ html_document: default
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/E221/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/E221/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
@@ -113,23 +112,23 @@ newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
 cast <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'G',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
+# nb.cast = predict.glm(binomialneg, newdata, type="response")
+# nb.mean = nb.cast #uma por mes
+# nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
+# 
+# size = nb.mean^2 /(nb.var - nb.mean)
+# prob = nb.mean / nb.var
+# 
+# nb.cast = fable(.model = 'G',
+#                 ano_mes = unique(cast$ano_mes),
+#                 qt_total_usuarios = dist_negative_binomial(size, prob),
+#                 mean = nb.cast,
+#                 d1 = c(NA, diff(nb.cast)),
+#                 response = 'qt_total_usuarios',
+#                 distribution = 'qt_total_usuarios')
+# 
+# cast <- cast %>%
+#   bind_rows(nb.cast)
 
 cast %>% 
   accuracy(soma,
@@ -142,18 +141,79 @@ Apesar do baixo AIC, o LM não teve um bom REQM (2140.3977) quando comparado aos
 análise dos gráficos
 
 ```{r}
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast %>% 
-  autoplot(soma) +
-  facet_wrap(~ .model, scales = "free") 
-# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
 
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.12 <- cast.12 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
 Ainda que as métricas analisadas apontem para a seleção do modelo ARIMA(4,1,0) com drift, nenhum dos modelos foi capaz de predizer a queda ao final do ano seguinte à última data da base de treino. Além disso, os modelos não contemplaram a componente sazonal (ou ciclica?) observada nos últimos dois anos.
 
 Com mais observações, seria interessante modelar considerando essa sazonalidade, bem como verificar se o mesmo fenômeno ocorre nos anos seguintes.
 
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('B', 'C'))
+m.remodelar <- T
+```
+
+Sugere-se B ou C, mas enfatiza-se a necessidade de uma nova modelagem com os dados mais recentes
 
 ```{r}
 save.image('E221.RData')

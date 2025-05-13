@@ -6,10 +6,9 @@ output: html_document
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/E230/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/E230/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
@@ -104,33 +103,67 @@ O modelo linear simples foi o melhor para a base de treino até maio de 2021. O 
 # Análise de resíduos
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2021/06"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'F',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
 Quanto ao REQM, quatro dos modelos ficaram abaixo de 13, somente Holt atingiu 29.34. Quanto aos escores winkler, o modelo que teve uma melhor aproximação dos dados reais foi o proposto pela análise das autocorrelações, ARIMA(1,1,2) com drift (escore 31.78) seguido pelo arima automático ((0,1,0) com drift, com escore 50.48).
@@ -149,6 +182,11 @@ cast %>%
 
 Houve uma maior variância ao final do período de validação do que durante o período de treino. Dessa forma, o modelo linear simples, apesar de ter o melhor ajuste à base de treino, não foi capaz de predizer o comportamento futuro dos pacientes. Por outro lado, os modelos ARIMA propostos ambos conseguiram predizer melhor que o LM. É interessante observar que os ARIMAs mantém os valores preditos logo no início do periodo de validação próximos aos últimos observados, algo que o LM não fez. Assim, os ARIMAs tiveram mais acertos no início da predição que o concorrente. Além disso, a propriedade dos ARIMAs de propagar as incertezas, aumentando o intervalo preditivo, permitiu que os valores mais futuros (12 meses) ainda estivessem dentro de seu intervalo de predição. Os modelos de alisamento exponencial tiveram intervalos preditivos muito largos para serem úteis, fato evidenciado pelos seus escores e pelos gráficos.
 Neste caso, o modelo escolhido seria o ARIMA(1,1,2) com drift, pelo seu escore melhor que os concorrentes, com REQM próximos.
+
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('A'))
+m.remodelar <- T
+```
 
 
 ```{r}
