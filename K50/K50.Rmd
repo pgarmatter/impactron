@@ -13,8 +13,6 @@ output:
 ```{r setup, message=FALSE, warning=FALSE}
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
-library(DBI)
 library(GGally)
 library(ggdist)
 library(ggfortify)

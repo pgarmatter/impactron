@@ -8,18 +8,12 @@ html_document: default
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/J848/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/J848/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
-library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -40,6 +34,11 @@ autoplot(soma, qt_total_usuarios) +
 ```
 
 Somente oito meses de dados na base, tornando a modelagem não recomendada.
+
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('none'))
+m.remodelar <- T
+```
 
 ```{r}
 save.image('J848.RData')
