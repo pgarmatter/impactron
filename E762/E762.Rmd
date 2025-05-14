@@ -8,18 +8,14 @@ html_document: default
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/E762/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/E762/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
+
 
 select <- dplyr::select
 
@@ -28,8 +24,10 @@ load("E762.RData")
 # preenchendo os gaps com 0
 meds <- meds %>% 
   as_tsibble() %>% 
-  mutate(d1 = difference(qt_usuarios) )
+  mutate(d1 = difference(qt_usuarios),
+         qt_total_usuarios = qt_usuarios)
 
+soma <- meds
 ```
 
 # Exploratória
@@ -45,6 +43,11 @@ meds %>% as_tibble() %>% group_by(tipo) %>% summarise(inicio = n_distinct(ano_me
 
 
 Somente 16 e 17 observações para tipo IV A e VI, respectivamente. Não recomendada a modelagem de séries temporais.
+
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome='none')
+m.remodelar <- T
+```
 
 ```{r}
 save.image('E762.RData')

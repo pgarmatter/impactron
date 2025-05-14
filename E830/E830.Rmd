@@ -8,18 +8,13 @@ html_document: default
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/E830/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/E830/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -40,6 +35,11 @@ autoplot(soma, qt_total_usuarios) +
 ```
 
 Como para E740 (Doença de Pompe), há poucos dados e pacientes para ajustarmos modelos de séries temporais com ARIMA ou Alisamento Exponencial. Seriam necessários cerca de 50+ observações para a correta modelagem usando essas técnicas.
+
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('none'))
+m.remodelar <- T
+```
 
 ```{r}
 save.image('E830.RData')
