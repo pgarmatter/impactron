@@ -8,18 +8,12 @@ html_document: default
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/I27/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/I27/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
-library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -105,33 +99,67 @@ O modelo linear simples foi o melhor (1433.021) para a base de treino até maio 
 # Análise de resíduos
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'F',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
 Quanto às métricas REQM e escore winkler, o modelo de alisamento exponencial de Holt obteve o menor REQM (162.3355) com escore 1737.494, o quarto menor. Entre os ARIMAs ajustados, o sazonal teve melhor REQM (195.3512) em comparação ao modelo proposto pela análise das FACs (312.4247). Por outro lado, o modelo proposto obteve um melhor escore (1370.601) que o sazonal (1874.497). O LM, apesar do baixo AIC, teve um REQM maior que os modelos de séries temporais (443.0318).
@@ -149,6 +177,10 @@ cast %>%
 
 Apesar do escore baixo, o modelo ARIMA proposto diverge da média observada na base de validação. O ARIMA sazonal e o AAN (Alisamento exponencial de Holt) não apresentam a mesma divergencia, ao mesmo tempo que mantém intervalos preditivos enxutos se comparados ao intervalo do MAN (alisamento exponencial com erros multiplicativos). Entre eles, sugere-se o uso de AAN para a modelagem futura, pois apresenta um bom ajuste, baixos erros e intervalo preditivo menor que as alternativas.
 
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('C'))
+m.remodelar <- F
+```
 
 ```{r}
 save.image('I27.RData')

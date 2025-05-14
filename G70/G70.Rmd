@@ -6,19 +6,12 @@ output: html_document
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/G70/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/G70/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
-library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -114,33 +107,67 @@ Em questão de AIC, o modelo linear simples foi o melhor para a base de treino a
 falta avaliar os intervalos de predição de quasip e nbinom.
 
 ```{r}
-newdata <- soma %>% filter(ano_mes >= yearmonth("2020/06"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(nb.cast) #var da serie
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'G',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
 Para Miastenia Gravis, a modelagem com menor escore de winkler foi Holt, como para D59 e D80-83. As raízes dos erros médios ficaram próximas entre os ARIMAs propostos (aprox 20.7 para ambos). 
@@ -148,14 +175,14 @@ Para Miastenia Gravis, a modelagem com menor escore de winkler foi Holt, como pa
 Analisar os gráficos e outras métricas para decidir entre AAN e os ARIMAs?
 
 ```{r}
-models$arima
+models$A
 ```
 
 O arima automatico ajustou sazonalidade, o que não foi observado nos dados. O modelo com erros multiplicativos teve o dobro de erro que o AAN.
 
 ```{r}
 
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
   facet_wrap(~ .model) +
   ylab('quantidade de pacientes') +
@@ -167,6 +194,10 @@ cast %>%
 
 Os gráficos mostram que os intervalos dos ARIMAs 111 e 112 são diferentes (112 maior). Ainda assim, tanto o escore do 111 quanto seu REQM foram mais baixos que as mesmas métricas do 112, sendo o primeiro preferível entre os dois. O uso do método de Holt ainda é mais "seguro" que ambos, pois seu intervalo abarca melhor os valores observados no intervalo de validação.
 
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('A', 'B', 'D'))
+m.remodelar <- F
+```
 
 ```{r}
 save.image('G70.RData')

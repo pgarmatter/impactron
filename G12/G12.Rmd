@@ -8,18 +8,12 @@ html_document: default
 ---
   
 ```{r}
-setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/G12/")
+# setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/G12/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
-library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -103,33 +97,67 @@ O modelo linear simples foi o melhor para a base de treino até maio de 2021. O 
 # Análise de resíduos
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2021/06"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'F',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
 
@@ -139,7 +167,7 @@ análise dos gráficos
 
 ```{r}
 
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
   facet_wrap(~ .model, scales = "free") 
 # geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
@@ -148,6 +176,10 @@ cast %>%
 
 O volume de dados utilzado na modelagem foi bem menor que para outros PCDTs (somente um ano e meio). Por isso, é importante obter mais dados antes de escolher uma modelagem, pois muito do comportamento da difusão pode não ter sido observada ainda. As métricas utilizadas apontam para o uso do ARIMA(0,1,0)c om drift, mas o resultado pode não ser conclusivo.
 
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('B'))
+m.remodelar <- T
+```
 
 ```{r}
 save.image('G12.RData')

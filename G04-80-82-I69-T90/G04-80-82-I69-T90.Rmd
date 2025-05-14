@@ -6,18 +6,12 @@ output: html_document
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/G04-80-82-I69-T90")
+# setwd("E:/GEATS/Estimador-AIO-SUS/G04-80-82-I69-T90")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
-library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -30,7 +24,7 @@ soma <- soma %>%
 
 ```
 
-# Explorat?ria
+# Exploratória
 
 ```{r, grafico}
 autoplot(soma, qt_total_usuarios) +
@@ -101,41 +95,75 @@ glance(models) %>%
 
 O modelo linear simples foi o melhor para a base de treino at? dezembro de 2019. O ARIMA selecionado pelo m?todo foi o ARIMA(0,1,3) com drift. Os AICs dos ARIMAs ficaram pr?ximos entre si (1660 para o autom?tico e 1671 para o AR(1) proposto). GLM com distribui??o binomial negativa teve melhor AIC que os m?todos de alisamento exponencial. No geral, os modelos se comportaram bastante como os de G24, mesmo modelando com dados at? dezembro do ano anterior.
 
-# An?lise de res?duos
+# Análise de resíduos
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2020/01"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'F',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
-No que se refere a REQM, o ML teve o melhor desempenho (1145.46), mas seu escore ? o terceiro menor (16421.8). O menor escore, em contrapartida, foi do alisamento exponencial com erros multiplicativos (MAN:10537.6), por?m, este modelo teve o pior REQM (1709.22). O Arima proposto (1,1,0) com drift teve o pior escore winkler (22502.24) mas o segundo melhor REQM (1456.29).
+No que se refere a REQM, o ML teve o melhor desempenho (1145.46), mas seu escore ? o terceiro menor (16421.8). O menor escore, em contrapartida, foi do alisamento exponencial com erros multiplicativos (MAN:11322), por?m, este modelo teve os piores REQMs. O Arima proposto (1,1,0) com drift teve o pior escore winkler (22502.24) mas o segundo melhor REQM (1456.29).
 
-an?lise dos gr?ficos
+# análise dos gráficos
 
 ```{r}
 
@@ -148,7 +176,7 @@ cast %>%
 
 ```
 
-Ajustando os modelos antes da presen?a da queda brusca no n?mero de pacientes, obt?m-se resultados piores que os observados para G24 (modelados com dados at? maio de 2020, incluindo o in?cio do decl?nio). Por outro lado, o intervalo crescente do m?todo MAN foi largo o suficiente para abarcar alguns dados observados nos 24 meses seguintes, como o seu escore sugeria. Os intervalos de predi??o dos outros m?todos foram incapazes de predizer a queda observada. Neste caso, seria interessante o uso do MAN para a modelagem, mas s? ? poss?vel afirmar isso conhecendo o futuro dos dados.
+Ajustando os modelos antes da presença da queda brusca no n?mero de pacientes, obt?m-se resultados piores que os observados para G24 (modelados com dados at? maio de 2020, incluindo o in?cio do decl?nio). Por outro lado, o intervalo crescente do m?todo MAN foi largo o suficiente para abarcar alguns dados observados nos 24 meses seguintes, como o seu escore sugeria. Os intervalos de predi??o dos outros m?todos foram incapazes de predizer a queda observada. Neste caso, seria interessante o uso do MAN para a modelagem, mas s? ? poss?vel afirmar isso conhecendo o futuro dos dados.
 
 Seria interessante tra?ar cen?rios conservadores com intervalos grandes, ao mesmo tempo que se usam modelos mais "certeiros" para cen?rios agressivos? Na pr?tica, faz sentido ter mais de um modelo para os dados e utiliz?-los de acordo com o que o analista acredita? (risco de vi?s??)
   
@@ -176,44 +204,83 @@ glance(models) %>%
 ```
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'F',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
   
 ```{r}
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
   facet_wrap(~ .model, scales = "free") +
   scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
   labs(title = "Estimativas de número de pacientes com espasticidade no SUS", 
        subtitle = "a partir de 2020/06")
 ```
+O modelo D teve o melhor desempenho no caso de treino a partir de 07/2020. Ainda se trata de uma alteração importante nos números de pacientes.
 
+```{r}
+m.selecionados <- tibble(key='Demanda total', nome=c('D'))
+m.remodelar <- T
+```
   
 ```{r}
 save.image('G04-80-82-I69-T90.RData')
