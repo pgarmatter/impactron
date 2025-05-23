@@ -570,7 +570,7 @@ Para rituximabe, o modelo cuja predição melhor se aproximou dos dados reais fo
 
 Apesar de todos os modelos subestimarem a difusão de tocilizumabe, todas as métricas apontam para o uso do modelo proposto A (ARIMA(1,1,0) com drift). O REQM para 12 meses foi o mais baixo (400.5904), seguido de E (suavização exponencial de Holt) (412.5250). Teve o segundo melhor REQM para 24 meses (404.0367) logo atrás de D (modelo de decomposição trend + remainder) (com 389.1621). Teve os melhores escores na base de validação: 2012.7949 em 12 meses e 1663.8949 em 24 meses, seguidos de 2054.9857 e 1841.4376 nos mesmos períodos para o modelo D.
 
-```{r}
+```{r  selecionados}
 m.selecionados <- tibble(key=c('Demanda total', 
                           'ABAT60432_intravenoso',
                           'ABAT60432_subcutaneo','ABAT60432_subcutaneo',

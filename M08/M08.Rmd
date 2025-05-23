@@ -23,8 +23,6 @@ output:
 ```{r setup, message=FALSE, warning=FALSE}
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
-library(DBI)
 library(GGally)
 library(ggdist)
 library(ggfortify)
@@ -33,7 +31,7 @@ library(splines)
 library(patchwork)
 library(distributional)
 
-setwd("E:/GEATS/Estimador-AIO-SUS/M08/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/M08/")
 load("M08.RData")
 
 select <- dplyr::select
@@ -102,34 +100,70 @@ Modelo E (TSLM) teve o melhor AIC seguido de B (ARIMA(0,1,0)(1,0,0)[12] w/ drift
 
 # Análise de resíduos (soma)
 
-```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+```{r acurácia treino 12 e 24 meses}
+(aics <- glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c(nb.label), AIC = c(AIC(binomialneg)))) )
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = nb.label,
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
+
 ```
 
 O modelo E teve um bom ajuste da média, com os menores resíduos registrados (REQM 148.5165), enquanto não teve um bom desempenho quanto ao intervalo preditivo (escore 1128.0271). No geral, o modelo C (suavização exponencial de Holt) teve um bom REQM (161.8803) e o melhor escore (778.8805).
@@ -299,6 +333,12 @@ meds.models %>%
 Não foi possível ajustar o modelo C para os medicamentos cujo número de concorrentes não se alterou durante a série temporal. Desta forma, somente adalimumabe, etanercepte e infliximabe contam com um modelo C ajustado. O mesmo é verificado para o modelo D, pelo mesmo motivo. Como o número de concorrente é constante para estas séries, não há ajuste que possa ser realizado.
 
 ```{r análise de resíduos (acurácia de treino)}
+(mm.aics <- meds.models %>% select(-D) %>%
+   glance() %>%
+   select(key, .model, AIC) %>% 
+   bind_rows(data.frame(key = unique(meds$key), .model = 'D', AIC = NA)) %>% 
+   arrange(key, .model))
+
 mm.t.acc <- meds.models %>% 
   accuracy(list(REQM = RMSE), level = 95) %>% 
   mutate(periodo = 0, winkler = NaN) %>% 
@@ -318,7 +358,7 @@ mm.f.acc.12 <- meds.cast.12 %>%
   accuracy(meds,
            list(REQM = RMSE,
                 winkler = winkler_score), level = 95) %>%
-  mutate(periodo = 12) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
   select(-.type) %>% 
   relocate(key, .model, periodo, REQM, winkler) %>% 
   arrange(key, .model)
@@ -333,20 +373,30 @@ mm.f.acc.24 <- meds.cast.24 %>%
   accuracy(meds,
            list(REQM = RMSE,
                 winkler = winkler_score), level = 95) %>%
-  mutate(periodo = 24) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
   select(-.type) %>% 
   relocate(key, .model, periodo, REQM, winkler) %>% 
   arrange(key, .model)
 
-(mm.f.acc <- mm.t.acc %>% 
-  union(mm.f.acc.12) %>% 
-  union(mm.f.acc.24) %>% 
-  filter(!is.na(REQM)) %>% 
-  arrange(key, .model) %>% 
-  pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>% 
-  pivot_wider(names_from = periodo, 
-              values_from = value, 
-              names_prefix = "v."))
+(mm.f.acc <- mm.aics %>%
+    inner_join(mm.t.acc) %>%
+    union(mm.f.acc.12) %>%
+    union(mm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(key, .model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(key, .model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
 A tabela acima apresenta as métricas dos modelos quando avaliados quanto aos seu resíduos em relação à base de treino e aos dados reais para 12 e 24 meses. 
@@ -427,6 +477,29 @@ A difusão de metotrexato oral é parecida com a de metotrexato injetável, por�
 ### Tocilizumabe
 
 Os REQMs do modelo F (suavização exponencial com erros multiplicativos) foram os mais baixos avaliados na base de validação (12 e 24 meses), contudo, teve os piores escores no mesmo período devido ao largo intervalo preditivo. Por outro lado, ambos os modelos B (ARIMA(1,1,1)(0,0,1)[12] com drift) e E (suavização exponencial de Holt) obtiveram REQMs e escores bastante parecidos. Em média, estes modelos tiveram REQM 10.35152, 18.61912 e 24.47366 para base de treino, doze e 24 meses, respectivamente. Sendo que o modelo B teve o menor REQM entre os dois em todos os três períodos, com desvios padrão 0.4693987, 0.1368322 e 0.06045763, na mesma ordem. Entre os modelos ajustados, contudo, os melhores escores foram os do modelo E, com 70.40179 para doze meses, contra 100.98053 do modelo B e 90.92757 em 24 meses contra 112.04630 do B. Sugere-se o uso do modelo E, apesar de não ter as melhores estimativas pontuais, pelo menor intervalo preditivo.
+
+```{r  selecionados}
+m.selecionados <- tibble(key=c('Demanda total', 
+                               'ABAT60432_injetavel',
+                               'ADAL60438_injetavel','ADAL60438_injetavel',
+                               'ETAN60438_injetavel',
+                               'INFL60438_injetavel','INFL60438_injetavel',
+                               'LEFL60432_oral','LEFL60432_oral',
+                               'METO60453_injetavel','METO60453_injetavel',
+                               'METO60453_oral', 'METO60453_oral',
+                               'TOCI60469_injetavel'), 
+                         nome=c('C', 'A',
+                                'A', 'C',
+                                'D', 
+                                'C', 'E',
+                                'A', 'B',
+                                'A', 'E',
+                                'B', 'E',
+                                'E'))
+m.remodelar <- F
+m.comentarios <- 'Para adalimumabe, sugere-se o uso conjunto dos modelos A e C, comparando os resultados das predições. Além disso, sugere-se que o uso dos modelos estimados para etanercepte se limite à predição de 12 meses.' #justificar?
+```
+
 
 ```{r}
 save.image(file = "M08.RData") 
