@@ -263,7 +263,7 @@ server <- function(input, output, session) {
         }else{
           m <- meds.models %>% 
             filter(key == getkey(input$droga))  
-            # select(!starts_with('key'))
+            # select(-starts_with('key'))
         }
       }else{
         m <- c()
@@ -275,7 +275,7 @@ server <- function(input, output, session) {
   m.select <- reactive({
     with(envs[[cid]], {
       if(exists("m.selecionados")){
-        print(m.selecionados)
+        print(paste('m.selecionados', getkey(input$droga), m.selecionados))
         key_ = ifelse(input$droga == series()[1] || !exists('meds.models'), 
                       'Demanda total', 
                       getkey(input$droga))
@@ -288,10 +288,12 @@ server <- function(input, output, session) {
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F, ignoreNULL = T)
   
   m.nomes <- reactive({
-    m.data() %>% pivot_longer(
-      cols = !starts_with('key'),
-      names_to = 'nome',
-      values_to = 'model_spec_mdl'
+    m.data() %>% 
+      select(-starts_with('key')) %>% 
+      pivot_longer(
+        cols = -starts_with('key'),
+        names_to = 'nome',
+        values_to = 'model_spec_mdl'
     ) %>% 
       left_join(m.select()) %>%
       mutate(selecionado = !is.na(key)) %>% 
@@ -322,7 +324,7 @@ server <- function(input, output, session) {
 
   output$modelos = renderTable({
     m.nomes() %>% 
-      select(!starts_with('key')) %>% 
+      select(-starts_with('key')) %>% 
       as_tibble() %>% 
       select(nome, modelo) 
   })
@@ -372,6 +374,7 @@ server <- function(input, output, session) {
   
   modelos.g.residuos = reactive({
     g <- m.data() %>% 
+      select(-starts_with('key')) %>% 
       pivot_longer(everything(), names_to = 'modelo') %>% 
       split(~modelo) %>% 
       map(~gg_tsresiduals(.))

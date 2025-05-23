@@ -140,6 +140,10 @@ O modelo E (TSLM) foi o com o melhor AIC, seguido dos A e B (ambos ARIMAs). O mo
 # Análise de resíduos (soma)
 
 ```{r acurácia treino 12 e 24 meses}
+(aics <- glance(models) %>% 
+  select(.model, AIC) %>% 
+  bind_rows(data.frame(.model = c(nb.label), AIC = c(AIC(binomialneg)))) )
+
 sm.t.acc <- models %>% 
   accuracy(list(REQM = RMSE), level = 95) %>% 
   mutate(periodo = 0, winkler = NA) %>% 
