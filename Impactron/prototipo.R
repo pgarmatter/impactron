@@ -166,7 +166,7 @@ server <- function(input, output, session) {
     cid <<- (pcdts %>% filter(nome == input$cid))$cid
     if(!(cid %in% names(envs))){
       envs[[cid]] <<- new.env()
-      print(paste(c('Criado env', cid, names(envs)), sep = " - "))
+      # print(paste(c('Criado env', cid, names(envs)), sep = " - "))
       load(paste0('../', cid, '/', cid, '.RData'), envir = envs[[cid]])
       with(envs[[cid]], {
         if(!('via' %in% colnames(tratamentos))){
@@ -257,16 +257,14 @@ server <- function(input, output, session) {
   
   m.data <- reactive({
     with(envs[[cid]], {
+      m <- c()
       if(exists('models')){
         if(input$droga == series()[1] || !exists('meds.models')){
           m <- models
-        }else{
+        }else if(getkey(input$droga) %in% unique(meds.models$key)){
           m <- meds.models %>% 
-            filter(key == getkey(input$droga))  
-            # select(-starts_with('key'))
+            filter(key == getkey(input$droga))
         }
-      }else{
-        m <- c()
       }
       m
     })
@@ -275,13 +273,13 @@ server <- function(input, output, session) {
   m.select <- reactive({
     with(envs[[cid]], {
       if(exists("m.selecionados")){
-        print(paste('m.selecionados', getkey(input$droga), m.selecionados))
+        # print(m.selecionados)
         key_ = ifelse(input$droga == series()[1] || !exists('meds.models'), 
                       'Demanda total', 
                       getkey(input$droga))
         m.selecionados %>% filter(key == key_)
       } else {
-        print('não há m.selecionados')
+        # print('não há m.selecionados')
         tibble(key = 'invalid', nome = 'invalid')
       }
     })
@@ -376,6 +374,7 @@ server <- function(input, output, session) {
     g <- m.data() %>% 
       select(-starts_with('key')) %>% 
       pivot_longer(everything(), names_to = 'modelo') %>% 
+      filter(!is_null_model(value)) %>%
       split(~modelo) %>% 
       map(~gg_tsresiduals(.))
     
