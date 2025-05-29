@@ -293,6 +293,7 @@ server <- function(input, output, session) {
         names_to = 'nome',
         values_to = 'model_spec_mdl'
     ) %>% 
+      filter(!is_null_model(model_spec_mdl)) %>% 
       left_join(m.select()) %>%
       mutate(selecionado = !is.na(key)) %>% 
       mutate(modelo = modelName(format(model_spec_mdl), selecionado))
