@@ -8,18 +8,13 @@ html_document: default
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/T454-E831/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/T454-E831/")
 library(fpp3)
 library(tidyverse)
-library(RPostgres)
 library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
 
 select <- dplyr::select
 
@@ -121,51 +116,76 @@ Mais uma vez o modelo linear simples teve o melhor AIC (1242.418) para a base de
 # Análise de resíduos
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-```
-
-Winkler de binomial negativa
-
-```{r}
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(nb.cast) #var da serie
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'F',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-```
-
-Unindo os forecasts para os cálculos de REQM e Winkler.
-
-```{r}
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
 ```
 
-O alisamento exponencial de Holt teve o melhor REQM (158.7767), seguido do ARIMA proposto durante a análise das autocorrelações (158.9162). Os melhores escores de winkler foram o LM (839.4227), o AAN (1022.4623) e o mesmo ARIMA (1090.0531).
+O alisamento exponencial de Holt (C) teve o melhor REQM (158.7767), seguido do ARIMA proposto durante a análise das autocorrelações (158.9162). Os melhores escores de winkler foram o LM (839.4227), o AAN (1022.4623) e o mesmo ARIMA (1090.0531).
 
 análise dos gráficos
 
 ```{r}
 
-cast %>%
+cast.24 %>%
   filter(.model != 'arima') %>% 
   autoplot(soma) +
   facet_wrap(~ .model, scales = "free") 
@@ -174,7 +194,18 @@ cast %>%
 ```
 
 O comportamento dos modelos AAN e arima110 é bastante parecido, nenhum dos dois foi capaz de predizer a queda no último ano, mas ambos contiveram-na em seu intervalo preditivo. Apesar de um bom escore, o LM estimou a média acima do observado já no primeiro mês, se aproximando do real à medida que este se elevava.
-Sugere-se o uso do método de Holt para a modelagem deste PCDT.
+<!-- Sugere-se o uso do método de Holt para a modelagem deste PCDT. -->
+Contudo, observando os gráficos e as métricas, é possível que o uso de A ou até B seja interessante. Por um lado, A teve estimativas pontuais melhores que C. Por outro, somente B considerou componente sazonal no seu ajuste.
+
+O modelo A é o sugerido nesse caso.
+
+```{r}
+m.selecionados <- tibble(key=c('Demanda total'),
+                         nome=c('A'))
+m.remodelar <- T
+m.comentarios <- 'Apenas o modelo B considerou componente sazonal em seu ajuste. Porém, as suas estimativas pontuais subestimaram os números reais e não acompanharam o crescimento nos números de pacientes como esperado. Seria interessante avaliar se há continuidade no comportamento sazonal e reajustar modelos novos se houver necessidade.'
+```
+
 
 ```{r}
 save.image('T454-E831.RData')

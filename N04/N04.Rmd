@@ -8,7 +8,7 @@ html_document: default
 ---
   
 ```{r}
-setwd("E:/GEATS/Estimador-AIO-SUS/N04/")
+# setwd("E:/GEATS/Estimador-AIO-SUS/N04/")
 library(fpp3)
 library(tidyverse)
 library(RPostgres)
@@ -16,10 +16,7 @@ library(DBI)
 library(ggfortify)
 library(MASS)
 library(distributional)
-# library(GGally)
-# library(ggdist)
-# library(splines)
-# library(patchwork)
+
 
 select <- dplyr::select
 
@@ -111,33 +108,68 @@ Mais uma vez o modelo linear simples teve o melhor AIC (497.4944) para a base de
 # Análise de resíduos
 
 ```{r}
-newdata = soma %>% filter(ano_mes >= yearmonth("2020/06"))
+(aics <- glance(models) %>% 
+  select(.model, AIC))
 
-cast <- models %>% 
+sm.t.acc <- models %>% 
+  accuracy(list(REQM = RMSE), level = 95) %>% 
+  mutate(periodo = 0, winkler = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM)
+
+# 12 
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 12)
+
+cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(nb.cast) #var da serie
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'E',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
-
-cast %>% 
+sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
-                winkler = winkler_score), level = 95)
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 12, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# 24
+
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+
+cast.24 <- models %>% 
+  forecast(new_data = newdata)
+
+sm.f.acc.24 <- cast.24 %>% 
+  accuracy(soma,
+           list(REQM = RMSE,
+                winkler = winkler_score), level = 95) %>% 
+  mutate(periodo = 24, AIC = NA) %>% 
+  select(-.type) %>% 
+  relocate(.model, periodo, REQM, winkler) %>% 
+  arrange(.model)
+
+# todos
+(sm.f.acc <- aics %>%
+    inner_join(sm.t.acc) %>%
+    union(sm.f.acc.12) %>%
+    union(sm.f.acc.24) %>%
+    filter(!is.na(REQM)) %>%
+    arrange(.model) %>%
+    fill(AIC, .direction = "downup") %>%
+    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    filter(!is.na(value)) %>%
+    pivot_wider(
+      names_from = c(metrica, periodo),
+      values_from = value,
+      names_sep = "."
+    ) %>%
+    relocate(.model, starts_with(c("AIC", "REQM", "wink"))) %>%
+    mutate(across(starts_with(c(
+      "AIC", "REQM", "wink"
+    )), ~ round(.x, 2))) %>% 
+    rename(Modelo = .model))
+
 ```
 
 O ARIMA(1,1,0) com drift teve as melhores métricas tanto para REQM (35.13595) quanto para o escore (114.9264). O segundo melhor para ambas as métricas foi o Holt (AAN) com REQM 35.77926 e escore 125.3616.
@@ -164,7 +196,16 @@ soma %>%
 ```
 
 Pela análise dos componentes, não é possível identificar um ponto em que a tendência aumenta. Dessa forma, não foi inserida essa informação na modelagem. 
+
 Entre os modelos disponíveis, sugere-se o uso do ARIMA(1,1,0) com drift.
+
+```{r selecionados}
+m.selecionados <- tibble(key=c('Demanda total'),
+                         nome=c('A'))
+m.remodelar <- F
+m.comentarios <- ''
+```
+
 
 ```{r}
 save.image('N04.RData')

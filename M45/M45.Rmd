@@ -24,7 +24,6 @@ output:
 library(fpp3)
 library(tidyverse)
 library(DBI)
-# library(data.table)
 library(GGally)
 library(ggdist)
 library(ggfortify)
@@ -33,7 +32,7 @@ library(splines)
 library(patchwork)
 library(distributional)
 library(kableExtra)
-# library(ggridges)
+
 source("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/lib/modelagem.R")
 
 setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/M45")
@@ -627,6 +626,25 @@ A forma oral de metotrexato teve quatro modelos com bom desempenho. O modelo C (
 ### Secuquinumabe
 
 Dada a escassez de dados para secuquinumabe, a modelagem também foi restrita. Ainda que dois modelos tenham sido ajustados, o ideal para a modelagem seria a obtenção de dados mais recentes, totalizando pelo menos 50 observações. Isto posto, o modelo A (ARIMA(1,1,0) w/ drift) estimou melhor a média da série que o modelo B (ARIMA(0,1,0) w/ drift), enquanto este teve melhores escores. Ainda que as métricas apontem para o uso do modelo B, o primeiro modelo contém os dados observados com maior margem, o que é interessante dada a escassez de dados. Reitera-se que há a necessidade de uma nova modelagem utilizando um volume mais expressivo de dados.
+
+```{r}
+m.selecionados <- tibble(key=c('Demanda total',
+                               'ADAL60438_injetavel', 
+                               'CERT60438_injetavel', 
+                               'ETAN60438_injetavel', 
+                               'GOLI60438_injetavel', 
+                               'INFL60438_injetavel', 
+                               'METO60453_injetavel', 'METO60453_injetavel',  
+                               'METO60453_oral', 'METO60453_oral', 
+                               'SECU60469_injetavel'), 
+                         nome=c('D', 'B', 'NA', 'B', 'E', 'A', 
+                                'A', 'B', 
+                                'A', 'E',
+                                'B'))
+m.remodelar <- T
+m.comentarios <- 'Os modelos ajustados para certolizumabe pegol podem não ser satisfatórios devido ao curto período disponível para o ajuste. O ideal neste caso seria ajustar os modelos com dados novos a fim de reavaliá-los.'
+```
+
 
 ```{r}
 save.image(file = "M45.RData") 
