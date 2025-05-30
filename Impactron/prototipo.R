@@ -98,7 +98,10 @@ ui <- page_sidebar(
       tableOutput('stats'),
       layout_column_wrap(
         width = 400,
+        heights_equal = 'row',
+        fill = F,
         card(card_header('Série temporal'), card_body(plotOutput("ts"))),
+        card(card_header('Decomposição'), card_body(plotOutput("decomposicao"))),
         card(card_header('Periodograma acumulado'), card_body(plotOutput("cpgram"))),
         card(card_header('FAC'), card_body(plotOutput("acf"))),
         card(card_header('FACP'), card_body(plotOutput("pacf")))
@@ -229,6 +232,13 @@ server <- function(input, output, session) {
   
   output$ts = renderPlot({
     data() %>% autoplot(qt_usuarios) + scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
+  })
+  
+  output$decomposicao = renderPlot({
+    data() %>% model(STL(qt_usuarios ~ trend() + season())) %>% 
+      components() %>% 
+      autoplot() + scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y') + 
+      labs(title=NULL)
   })
     
   output$acf = renderPlot({
