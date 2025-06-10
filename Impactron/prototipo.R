@@ -34,10 +34,6 @@ cid <- ''
 series <- c()
 envs <- list()
 
-getNomeSerie <- function(id, via){
-  paste(id, via)
-}
-
 getkey <- function(nome_serie){
   # nome_serie
   envs[[cid]]$nome_serie = nome_serie
@@ -179,7 +175,7 @@ server <- function(input, output, session) {
           mutate(no_legivel = str_to_sentence(sub(
             "(\\w) ?\\d.*", "\\1", no_procedimento, ignore.case = T
           )),
-          no_serie = paste(no_legivel, via, sep = " - "),
+          no_serie = gsub(' - $', '', paste(no_legivel, via, sep = " - ")),
           key = paste(no_identificador, via, sep = '_'))
         if(!('key' %in% colnames(meds))){
           meds <- meds %>% mutate(key = paste0(no_identificador, '_'))

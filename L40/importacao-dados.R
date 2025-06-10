@@ -64,7 +64,7 @@ tratamentos <- as.data.frame(read.csv(
   header = T,
   encoding = "UTF-8"
 ),) %>%
-  inner_join(tb_sigtap)
+  inner_join(tb_sigtap, by=join_by(co_sigtap == COD))
 
 # base não compilada
 base <- tb_medicamentos %>%
