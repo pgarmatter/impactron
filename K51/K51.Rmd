@@ -32,10 +32,14 @@ library(patchwork)
 library(distributional)
 
 # setwd("/mnt/Arquivos/GEATS/Estimador-AIO-SUS/M33/")
-load("M33.RData")
+load("K51.RData")
 
 if(exists("meds.bkp")){
   meds <- meds.bkp
+}
+
+if(exists("soma.bkp")){
+  soma <- soma.bkp
 }
 
 select <- dplyr::select
@@ -47,15 +51,21 @@ prefixo = paste0(getwd(), '/', ddd, '-')
 # Exploratória Soma
 
 ```{r}
+soma.bkp <- soma
+soma <- soma %>% filter(ano_mes > yearmonth('2010/12', format='%Y/%m'))
+
 autoplot(soma, qt_total_usuarios) + 
   scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
 ```
+
+Há somente 26 observações, o que pode ser insuficiente para a modelagem com métodos de análise de séries temporais.
 
 ```{r, media variancia}
 mean(soma$qt_total_usuarios)
 var(soma$qt_total_usuarios)
 ```
-Apesar de bastantes observações, média e variância diferentes. É possível fazer análises, mas não utilizar Poisson no GLM (superdispersão).
+
+Média e variância diferentes. É possível fazer análises, mas não utilizar Poisson no GLM (superdispersão).
 
 ```{r, time series soma}
 gg_tsdisplay(soma, y = qt_total_usuarios, plot_type = "partial")
@@ -76,7 +86,7 @@ ggcpgram(soma$qt_total_usuarios) +
 
 ```
 
-Tudo indica que a soma pode ser modelada.
+Desconsiderando o volume baixo de dados, tudo indica que a soma pode ser modelada.
 
 # Modelagem Soma
 
@@ -92,17 +102,11 @@ models <- soma.treino %>%
         D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
         E = TSLM(qt_total_usuarios ~ ano_mes))
 
-quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
-
-binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
-nb.label = "F"
-
 glance(models) %>% 
-  select(.model, AIC) %>% 
-  bind_rows(data.frame(.model = c('quasipoisson', nb.label), AIC = c(NA, AIC(binomialneg)))) 
+  select(.model, AIC)
 ```
 
-O modelo E (TSLM em função do tempo) teve o melhor AIC entre os modelos ajustados (931.4996). O modelo ARIMA(1,1,0) com drift (A), proposto pela análise das FAC, seguiu em segundo com AIC 1063.5835.
+Como esperado, não foi possível ajustar os modelos ARIMA(1,1,0) ou suavização exponencial de Holt para a demanda total. O modelo B, encontrado pelo método stepwise, foi o ARIMA(0,0,0), o que indica ruído branco.
 
 # Análise de resíduos (soma)
 
@@ -184,25 +188,30 @@ cast.24 %>%
   labs(title = "Estimativas de número de pacientes com Retocolotite Ulcerativa no SUS", 
        subtitle = "a partir de 2020/06")
 
+
 ```
 
-A análise dos gráficos corrobora a conclusão de que o modelo E seja o melhor candidato entre os modelos ajustados.
+Nenhum modelo teve bom ajuste.
 
 # Análises de medicamentos
 
 ```{r}
 tratamentos %>% 
-  select(no_identificador, via, linha_tto, doses_min, doses_max) %>% 
+  select(no_identificador, via) %>% 
   unique()
 ```
 
-Dá-se prioridade ao tratamento com metotrexato injetável, seguindo com imunoglobulina humana ou metotrexato oral.
+Ambos infliximabe e vedolizumabe foram incorporados em 2019, sendo que infliximabe teve início de dispensação mais cedo que vedolizumabe. Tofacitinibe, por sua vez, só tem duas observações nos dados.
 
 ```{r rechaveamento de meds}
+meds.bkp <- meds
 meds <- meds %>% 
   mutate(key = paste(no_identificador, via, sep = '_')) %>% 
-  as_tsibble(key = key, index = ano_mes)
+  as_tsibble(key = key, index = ano_mes) %>% 
+  filter(ano_mes > yearmonth('2010/12', format='%Y/%m'))
 ```
+
+Filtrados dados de 2010, pois há 3 ocorrências de uso de infliximabe antes da incorporação e vários anos sem utilização, o que poderia influenciar os modelos.
 
 Como a abordagem de modelagem da diferenciada da tendência não foi satisfatória para M45, o método não foi reproduzido para outros PCDTs. Segue-se para as outras análises.
 
@@ -212,7 +221,7 @@ meds <- meds %>% mutate(d1 = difference(qt_usuarios))
 
 meds %>% 
   filter(d1 > -200 & d1 < 200) %>% 
-  ggplot(aes(x = as.ordered(linha_tto), y = d1, colour = key)) + 
+  ggplot(aes(x = as.ordered(no_identificador), y = d1, colour = key)) + 
   geom_boxplot() +
   labs(title = "Por linha de tratamento")
 
@@ -229,7 +238,7 @@ meds %>%
   labs(title = "Por qt_concorrentes")
 ```
 
-Apesar de pouco expressivo, o aumento no número de concorrentes parece diminuir a taxa de difusão dos medicamentos.
+O aumento no número de concorrentes parece diminuir a taxa de difusão de infliximabe e aumentar a de vedolizumabe.
 
 ```{r por qt_total_usuarios e ano_mes}
 meds %>% 
@@ -247,7 +256,7 @@ meds %>%
   facet_wrap(~key)
 ```
 
-Finalmente, as séries diferenciadas parecem razoavelmente estacionárias na média com o aumento no número total de pacientes, bem como com o passar do tempo (altamente correlacionado com o número de pacientes total), salvo abatacepte e certolizumabe pegol, que tendem a diminuir com o tempo. Não parece haver uma diferença considerável na variância com o decorrer do tempo para os outros medicamentos.
+Não parece haver relação entre o número total de pacientes e a diferenciada.
 
 ## Seguindo com a modelagem dos medicamentos
 
@@ -262,7 +271,7 @@ for(i in unique(meds$key)) {
 }
 ```
 
-Os periodogramas acumulados de pacientes de todos os medicamentos apontam para a existência de componente sistemático a ser modelado.
+As séries dos medicamentos infliximabe e vedolizumabe parecem ter componente sistemático a ser modelado. Contudo, a série de vedolizumabe parece ser mais aleatória que a outra.
 
 ```{r}
 meds %>% 
@@ -273,14 +282,9 @@ meds %>%
             total_meses = n())
 ```
 
-Há dados suficientes para a modelagem de todas as drogas.
+Há poucos dados, o que pode prejudicar o uso dos modelos de séries temporais.
 
 ```{r tsplot (meds)}
-# removendo os medicamentos não modelados.
-meds.bkp <- meds
-
-#remover medicamentos a não serem modelados
-# meds <- meds %>% filter(!(no_identificador %in% c("BAMGPOCO60432")))
 
 for(i in unique(meds$key)) {
   print(
@@ -293,7 +297,7 @@ for(i in unique(meds$key)) {
 }
 ```
 
-A análise dos gráficos de autocorrelação (ACF) e autocorrelação parcial (PACF) sugerem que todas as séries de medicamentos sigam processos AR(1): ACF decrescente infinito e PACF com pico em lag 1 e zero dali em diante. Salvo algumas exceções, todas as séries parecem bastante estacionárias na média. O uso de abatacepte diminui até quase zero ao final da série, um comportamento que provavelmente não será capturado pelos modelos ajustados. A queda no número de pacientes de etanercepte, contudo, se inicía mais cedo, o que talvez possibilite os modelos que estimem melhor o comportamento subsequente. Por fim, metotrexato intrevenoso apresenta maior variância na série toda relativo aos demais medicamentos.
+Tofacitinibe não deve ser modelado, pois não há dados suficientes. As outras duas drogas parecem ser geradas por um ARIMA(1,1,0), pelo comportamento de suas FAC e FACP. 
 
 ```{r modelagem (meds)}
 # meds.treino <- meds %>% filter(ano_mes < yearmonth("2020/06")) %>% select(-d1)
@@ -320,12 +324,8 @@ meds.models %>%
   select(key, B:D)
 ```
 
-Os modelos que não puderam ser ajustados em iterações anteriores foram devido a gaps implícitos nos dados, tratados com implicitamente replicando o mês anterior no caso em que ocorreu (2o mes do primeiro ano).
-
-<!-- Não foi possível ajustar modelos lineares com erros ARIMA, nem modelos de decomposição em trend+remainder para tofacitinibe, leflunomida e metotrexato. Isso se deve a só haver um número de concorrentes para cada uma dessas drogas no decorrer da base de treino. Assim, os modelos que tomam qt_concorrente como parâmetro não foram possíveis de ajustar. -->
   
-  
-  ```{r análise de resíduos (acurácia de treino)}
+```{r análise de resíduos (acurácia de treino)}
 (mm.aics <- meds.models %>% select(-D) %>%
     glance() %>%
     select(key, .model, AIC) %>% 
@@ -436,34 +436,12 @@ for(i in unique(meds$key)){
 }
 ```
 
-Já as tabelas e gráficos acima apresentam somente os modelos com os melhores REQM e escore Winkler. Sendo eles:
-  
-  ### Imunoglobulina humana
-  
-  # para a dissertação, replotar os gráficos para ilustrar os erros
-  
-  A curva de pacientes de imunoglobulina humana no tratamento de Retocolotite Ulcerativa no SUS teve uma alteração na tendência seguindo o término da base de treino (2020/06). Devido a esta mudança na tendência, nenhum dos modelos foi preciso nas estimativas para 12 e 24 meses. Em geral, os modelos superestimaram os números na primeira metade e subestimaram na segunda metade do período. Portanto, foi realizado novo ajuste, com mais tempo de treino, incluindo os doze meses seguintes. 
-Mesmo com a nova modelagem, os modelos para imunoglobulina humana continuaram subestimando os números de pacientes da série. O modelo F tem um intervalo preditivo largo, o que não é desejável em outros casos mas é bem vindo aqui. O intervalo mais largo permite conter os valores observados. Além disso, a métrica de estimativas pontuais para 12 meses foi a segunda melhor entre as avaliadas, perdendo apenas para o modelo C, que tem como parâmetro um valor desconhecido no momento da predição (número total de pacientes). Por isso, sugere-se o uso do modelo F.
-
-### Metotrexato injetável
-
-Ao término dos primeiros doze meses de validação dos modelos para metotrexato injetável, houve uma queda considerável no número de pacientes tratado com este medicamento. Apesar de haver quedas na série histórica, elas não demonstram sazonalidade. Sendo assim, os modelos ajustados não foram capazes de predizer esse comportamento. Por conta dessa queda, as predições para o segundo ano de validação superestimaram os números de pacientes. Seria benéfico um novo ajuste incluindo essa queda nos modelos.
-Os modelos ajustados para metotrexato injetável com a base de treino até 2020/05 foram B1: ARIMA(0,1,0) w/ drift e E1: alfa=1, beta=0.0001, l=.683, b=1.17.
-Para a base de treino até 2021/05, B2: ARIMA(2,1,2)(0,0,1)[12] e E2: alfa 0.915, beta=.0001, l=.759, b=.823. Porém, o modelo B1 teve as melhores métricas entre os modelos ajustados com a base menor, juntamente com A1. Em contraste, na base maior de treino, apesar de menor AIC, o modelo B teve escore e REQMs mais altos que o ARIMA proposto e o modelo E. O modelo A foi mais consistente em ter métricas baixas em relação às alternativas. Por isso, sugere-se o modelo A.
-
-### Metotrexato oral
-
-Tanto as métricas quanto os gráficos dos modelos apontam para a escolha do modelo C para metotrexato oral na primeira iteração de ajustes. Contudo, como ambas as outras séries precisaram ser reajustadas devido a comportamentos imprevistos nas séries, o mesmo foi feito para metotrexato oral.
-O comportamento das métricas se manteve para a base maior, colocando o modelo C como preferido entre os ajustados. Vale mencionar que o modelo D (decomposição trend+remainder) teve melhores REQMs melhores para esta base de treino, mas ficou atrás do C em outras métricas.
 
 ```{r selecionados}
-m.selecionados <- tibble(key=c('Demanda total',
-                               'IMUN60431_injetavel',
-                               'METO60453_injetavel', 
-                               'METO60453_oral'), 
-                         nome=c('A','F','A','C'))
-m.remodelar <- F
-m.comentarios <- 'Os modelos ajustados com os dados até maio de 2020 não tiveram um desempenho satisfatório na predição de números de pacientes para depois desse intervalo. O comportamento de imunoglobulina humana e metotrexato injetável nos doze meses seguintes (até maio de 2021) diferiu do que era comum às séries anteriormente. Dessa forma, os modelos para os medicamentos usados no tratamento de Retocolotite Ulcerativa foram ajustados com mais observações, para tentar incluir o comportamento nas bases de treino. Isso melhorou o desempenho dos modelos nos doze meses restantes, mas impossibilitou a avaliação do desempenho além desse intervalo.'
+m.selecionados <- tibble(key=c(''), 
+                         nome=c(''))
+m.remodelar <- T
+m.comentarios <- 'Poucas observações presentes nos dados de retocolite ulcerativa no momento da extração. Ideal obter mais dados antes de modelar.'
 ```
 
 
@@ -473,5 +451,4 @@ save.image(file = "K51.RData")
 
 # Conclusões
 
-Para a modelagem da demanda total, sugere-se o uso do modelo ARIMA(0,1,0)(1,0,0)[12] com drift ou ARIMA(1,1,0) com drift. Preferivelmente o primeiro, por ter métricas melhores.
-
+Não foi possível modelar
