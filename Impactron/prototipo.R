@@ -167,7 +167,7 @@ server <- function(input, output, session) {
     if(!(cid %in% names(envs))){
       envs[[cid]] <<- new.env()
       # print(paste(c('Criado env', cid, names(envs)), sep = " - "))
-      load(here(paste0(cid, '/', cid, '.RData')), envir = envs[[cid]])
+      load(here(cid, paste0(cid, '.RData')), envir = envs[[cid]])
       with(envs[[cid]], {
         if(!('via' %in% colnames(tratamentos))){
           tratamentos <- tratamentos %>% mutate(via = '')
