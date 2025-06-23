@@ -26,6 +26,7 @@ library(MASS)
 library(splines)
 library(patchwork)
 library(distributional)
+library(here)
 
 select <- dplyr::select
 
@@ -166,7 +167,7 @@ server <- function(input, output, session) {
     if(!(cid %in% names(envs))){
       envs[[cid]] <<- new.env()
       # print(paste(c('Criado env', cid, names(envs)), sep = " - "))
-      load(paste0('../', cid, '/', cid, '.RData'), envir = envs[[cid]])
+      load(here(paste0(cid, '/', cid, '.RData')), envir = envs[[cid]])
       with(envs[[cid]], {
         if(!('via' %in% colnames(tratamentos))){
           tratamentos <- tratamentos %>% mutate(via = '')
