@@ -34,6 +34,15 @@ autoplot(soma, qt_total_usuarios) +
   scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')
 ```
 
+```{r, modelos - não ajustados}
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2021/06"))
+
+models <- soma.treino %>% 
+  model(A = NAIVE(qt_total_usuarios))
+
+glance(models)
+```
+
 Como para E740 (Doença de Pompe), há poucos dados e pacientes para ajustarmos modelos de séries temporais com ARIMA ou Alisamento Exponencial. Seriam necessários cerca de 50+ observações para a correta modelagem usando essas técnicas.
 
 ```{r}

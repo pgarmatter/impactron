@@ -264,7 +264,7 @@ server <- function(input, output, session) {
   
   m.data <- reactive({
     with(envs[[cid]], {
-      m <- c()
+      m <- NULL
       if(exists('models')){
         if(input$droga == series()[1] || !exists('meds.models')){
           m <- models
@@ -293,25 +293,31 @@ server <- function(input, output, session) {
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F, ignoreNULL = T)
   
   m.nomes <- reactive({
-    m.data() %>% 
-      select(-starts_with('key')) %>% 
-      pivot_longer(
-        cols = -starts_with('key'),
-        names_to = 'nome',
-        values_to = 'model_spec_mdl'
-    ) %>% 
-      filter(!is_null_model(model_spec_mdl)) %>% 
-      left_join(m.select()) %>%
-      mutate(selecionado = !is.na(key)) %>% 
-      mutate(modelo = modelName(format(model_spec_mdl), selecionado))
+    if(is.null(m.data())){
+      tibble(nome = "", modelo="")
+    }else{
+      m.data() %>% 
+        select(-starts_with('key')) %>% 
+        pivot_longer(
+          cols = -starts_with('key'),
+          names_to = 'nome',
+          values_to = 'model_spec_mdl'
+      ) %>% 
+        filter(!is_null_model(model_spec_mdl)) %>% 
+        left_join(m.select()) %>%
+        mutate(selecionado = !is.na(key)) %>% 
+        mutate(modelo = modelName(format(model_spec_mdl), selecionado))
+    }
   })
   
   f.acc <- reactive({
     with(envs[[cid]], {
       if(input$droga == series()[1] || !exists('meds.models')){
-        sm.f.acc
+        get0('sm.f.acc')
       }else{
-        mm.f.acc %>% filter(key == getkey(input$droga))
+        if(exists('mm.f.acc')){
+          mm.f.acc %>% filter(key == getkey(input$droga))
+        }else{NULL}
       }
     })
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
@@ -336,6 +342,9 @@ server <- function(input, output, session) {
   })
   
   output$accuracy = renderText({
+    if(is.null(f.acc())){
+      return('')
+    }
     boldmap = f.acc() %>% 
       mutate(across(starts_with(c("AIC", "REQM", "wink")), ~ (.x == min(.x, na.rm = T)) %in% T)) 
     
@@ -352,6 +361,9 @@ server <- function(input, output, session) {
   })
   
   modelos.g.validacao = reactive({
+    if(is.null(m.data())){
+      return(list(h4("Nenhum modelo ajustado.")))
+    }
     newdata = data() %>% 
       filter(ano_mes > max(t.data()$ano_mes), ano_mes <= max(t.data()$ano_mes) + 24)
     if(input$droga == series()[1] || !exists('meds.models')){
@@ -379,6 +391,9 @@ server <- function(input, output, session) {
   })
   
   modelos.g.residuos = reactive({
+    if(is.null(m.data())){
+      return(NULL)
+    }
     g <- m.data() %>% 
       select(-starts_with('key')) %>% 
       pivot_longer(everything(), names_to = 'modelo') %>% 
@@ -412,7 +427,7 @@ server <- function(input, output, session) {
   
   output$forecast.graficos = renderUI({
     if (is.null(input$s.model) || input$s.model == "") {
-      return(h3('Selecione um modelo e um período (meses) para estimar.'))
+      return(h4('Selecione um modelo e um período (meses) para estimar.'))
     }
     
     return(plotOutput(outputId = "forecast.graficos.plot"))
