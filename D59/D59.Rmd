@@ -86,11 +86,12 @@ Base separada temporalmente até maio de 2020, para ter 2 anos completos de dado
 soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
 
 models <- soma.treino %>% 
-  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,5) + PDQ(0,0,0)),
-        B = ARIMA(qt_total_usuarios),
-        C = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
-        D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
-        E = TSLM(qt_total_usuarios ~ ano_mes))
+  model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
+        B = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,5) + PDQ(0,0,0)),
+        C = ARIMA(qt_total_usuarios),
+        D = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")),
+        E = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
+        F = TSLM(qt_total_usuarios ~ ano_mes))
 
 # como computar os escores?
 quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
@@ -242,7 +243,7 @@ Olhando os gráficos, o ARIMA115 parece muito com o naive, enquanto o Holt conse
 Faria sentido analisar outros intervalos para o treinamento? Predições de 12 e 24 meses são as maiores que podem ser validadas para bases de treino até 2020/06
 
 ```{r}
-m.selecionados <- tibble(key='Demanda total', nome='C')
+m.selecionados <- tibble(key='Demanda total', nome='D')
 ```
 
 ```{r}

@@ -180,7 +180,8 @@ cast.24 %>%
   facet_wrap(~ .model, scales = "free") +
   scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y') +
   labs(title = "Estimativas de número de pacientes de hidradenite supurativa no SUS", 
-       subtitle = "a partir de 2021/06")
+       subtitle = "a partir de 2021/06") + 
+  theme(legend.position = "none")
 # geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
 
 ```

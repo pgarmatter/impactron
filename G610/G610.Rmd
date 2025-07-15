@@ -34,7 +34,7 @@ soma %>%
   model(classical_decomposition(qt_total_usuarios, type='additive')) %>% 
   components() %>% 
   autoplot() +
-  labs(title = "Decomposição da série de número de pacientes de D610", 
+  labs(title = "Decomposição da série de número de pacientes de G610", 
        subtitle = 'tratados no SUS com imunoglobulina humana')
 ```
 
@@ -187,16 +187,23 @@ análise dos gráficos
 
 cast.24 %>% 
   autoplot(soma) +
-  facet_wrap(~ .model) 
-# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+  facet_wrap(~ .model) +
+  ylab('quantidade de pacientes') +
+  scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
+  labs(title = "Estimativas de número de pacientes de Gillain-Barré no SUS", 
+       subtitle = "a partir de 2020/06") + 
+  theme(legend.position="none") 
+
 
 ```
 
-Percebe-se que, em todos eles, os intervalos preditivos foram bem maiores que nos modelos anteriores (métrica pra isso aqui?). Os modelos foram capazes de predizer a variância iminente, sem assertividade quanto ao seu sentido. Como comentado anteriormente, arima automático se trata de um naive com erros cumulativos, enquanto o 111 com drift conseguiu capturar a tendencia crescente da série, bem como o AAN. O único modelo a estimar uma tendencia negativa foi o MAN.
+Percebe-se que, em todos eles, os intervalos preditivos foram bem maiores que nos modelos anteriores (métrica pra isso aqui?).  
+Nenhum modelo conseguiu predizer o crescimento no período de 24 meses seguidos à base de treino. Os dois modelos A e C, contudo, foram os que melhor se aproximaram do observado. O ideal neste caso seria uma nova modelagem futura com dados atualizados.
 
 ```{r}
 m.selecionados <- tibble(key='Demanda total', nome=c('none'))
 m.remodelar <- T
+m.observacoes <- "Nenhum modelo conseguiu predizer o crescimento no período de 24 meses seguidos à base de treino. Os dois modelos A e C, contudo, foram os que melhor se aproximaram do observado. O ideal neste caso seria uma nova modelagem futura com dados atualizados."
 ```
 
 ```{r}

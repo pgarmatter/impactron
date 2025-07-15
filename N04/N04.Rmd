@@ -92,14 +92,8 @@ models <- soma.treino %>%
         C = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
         D = TSLM(qt_total_usuarios ~ ano_mes))
 
-quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
-
-binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
-
 glance(models) %>% 
-  select(.model, AIC) %>% 
-  bind_rows(data.frame(.model = c('quasipoisson', 'E'), AIC = c(NA, AIC(binomialneg)))) %>% 
-  arrange(AIC) 
+  select(.model, AIC) 
 
 ```
 
@@ -178,10 +172,11 @@ análise dos gráficos
 
 ```{r}
 
-cast %>%
+cast.24 %>%
   filter(.model != 'arima') %>% 
   autoplot(soma) +
-  facet_wrap(~ .model, scales = "free") 
+  facet_wrap(~ .model, scales = "free") +
+  theme(legend.position = "none")
 # geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
 
 ```

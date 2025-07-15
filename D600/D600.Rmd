@@ -145,13 +145,14 @@ análise dos gráficos
 
 ```{r}
 
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
   facet_wrap(~ .model) +
   ylab('quantidade de pacientes') +
   scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
   labs(title = "Estimativas de número de pacientes de aplasia pura adquirida crônica no SUS", 
-       subtitle = "a partir de 2020/06")
+       subtitle = "a partir de 2020/06") + 
+  theme(legend.position = "none")
 
 ```
 

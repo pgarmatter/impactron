@@ -89,14 +89,9 @@ models <- soma.treino %>%
         E = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
         F = TSLM(qt_total_usuarios ~ ano_mes))
 
-quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
-
-binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
 
 glance(models) %>% 
-  select(.model, AIC) %>% 
-  bind_rows(data.frame(.model = c('quasipoisson', 'G'), AIC = c(NA, AIC(binomialneg)))) %>% 
-  arrange(AIC) 
+  select(.model, AIC) 
 
 ```
 
@@ -174,7 +169,7 @@ análise dos gráficos
 
 ```{r}
 
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
   facet_wrap(~ .model, scales = "free") 
 # geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
@@ -187,8 +182,8 @@ Apesar de ter o melhor escore entre os modelos ajustados, o arimaError não teve
 soma.treino <- soma %>% filter(ano_mes < yearmonth("2021/06"))
 
 models <- soma.treino %>% 
-  model(arimaError = ARIMA(qt_total_usuarios ~ trend(knots = c(yearmonth('2019-10'))) + pdq()),
-        AAN = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")))
+  model(B = ARIMA(qt_total_usuarios ~ trend(knots = c(yearmonth('2019-10'))) + pdq()),
+        D = ETS(qt_total_usuarios ~ error("A") + trend("A") + season("N")))
 
 glance(models) %>% 
   select(.model, AIC) %>% 
@@ -223,8 +218,9 @@ Infelizmente, a adição de doze meses aos dados de treino não foi o suficiente
 Contudo, entre os modelos ajustados, seria possível a recomendação do uso do LM com erros ARIMA, considerando outubro de 2019 como um ponto de alteração de tendência.
 
 ```{r}
-m.selecionados <- tibble(key='Demanda total', nome=c('B'))
-m.remodelar <- F
+m.selecionados <- tibble(key='Demanda total', nome=c('none'))
+m.remodelar <- T
+m.observacoes <- "O modelo B (LM com erros ARIMA), mesmo que informado do ponto de alteração de tendência e alimentado mais dados, estimou números decrescentes de pacientes. As predições do modelo subestimaram os dados reais observados no período seguinte de 12 meses. Apesar de ter as melhores métricas, não é prudente o uso deste modelo."
 ```
 
 

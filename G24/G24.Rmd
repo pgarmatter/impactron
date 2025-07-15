@@ -77,7 +77,8 @@ ACF, LB e CPGRAM indicam não ser ruído branco.
 Como só tem uma droga incorporada, podemos ajustar um modelo linear simples com o ano_mes como variável preditora. GLM com binomial negativa a quasipoisson. Base separada temporalmente até maio de 2021, para ter pelo menos 1 ano completo de dados para a validação.
 
 ```{r}
-soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+# soma.treino <- soma %>% filter(ano_mes < yearmonth("2020/06"))
+soma.treino <- soma %>% filter(ano_mes < yearmonth("2021/06"))
 
 models <- soma.treino %>% 
   model(A = ARIMA(qt_total_usuarios ~ 1 + pdq(1,1,0) + PDQ(0,0,0)),
@@ -86,14 +87,9 @@ models <- soma.treino %>%
         D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
         E = TSLM(qt_total_usuarios ~ ano_mes))
 
-quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
-
-binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
-# binomial negativa n?o converge?
-
 glance(models) %>% 
-  select(.model, AIC) %>% 
-  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) 
+  select(.model, AIC)
+ 
 
 ```
 
@@ -129,7 +125,10 @@ sm.f.acc.12 <- cast.12 %>%
 
 # 24
 
-newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24)
+newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(soma.treino$ano_mes) + 24) %>% 
+  append_row(n = max(0, 24 - (max(soma$ano_mes) - max(soma.treino$ano_mes)))) %>% 
+  fill(everything())
+
 
 cast.24 <- models %>% 
   forecast(new_data = newdata)
@@ -176,8 +175,9 @@ cast.24 %>%
   facet_wrap(~ .model, scales = "free") +
   scale_x_yearmonth(date_breaks = '4 years', date_labels='%Y') +
   labs(title = "Estimativas de número de pacientes com distonias e espasmos hemifaciais no SUS", 
-       subtitle = "a partir de 2020/06")
-# geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
+       # subtitle = "a partir de 2020/06") +
+       subtitle = "a partir de 2021/06") +
+  theme(legend.position = "none")
 
 ```
 
@@ -186,8 +186,9 @@ A queda observada se deu dentro do intervalo utilizado para a base de treino. De
 Refazer com base de treino at? janeiro de 2020?
 
 ```{r}
-m.selecionados <- tibble(key='Demanda total', nome=c('D'))
+m.selecionados <- tibble(key='Demanda total', nome=c('E'))
 m.remodelar <- T
+m.observacoes <- "Os modelos foram ajustados novamente com doze meses a mais de dados. Nessa segunda iteração, o modelo E (modelo linear com componentes de séries temporais) teve melhor desempenho que o restante."
 ```
 
 

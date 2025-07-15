@@ -205,6 +205,13 @@ sm.f.acc.24 <- cast.24 %>%
 ```
 
 Ainda que as métricas analisadas apontem para a seleção do modelo ARIMA(4,1,0) com drift, nenhum dos modelos foi capaz de predizer a queda ao final do ano seguinte à última data da base de treino. Além disso, os modelos não contemplaram a componente sazonal (ou ciclica?) observada nos últimos dois anos.
+```{r}
+cast.24 %>% 
+  autoplot(soma) +
+  facet_wrap(~ .model, scales = "free") +
+  scale_x_yearmonth(date_breaks = '1 years', date_labels='%Y') +
+  theme(legend.position = "none")
+```
 
 Com mais observações, seria interessante modelar considerando essa sazonalidade, bem como verificar se o mesmo fenômeno ocorre nos anos seguintes.
 

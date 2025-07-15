@@ -40,6 +40,9 @@ if(exists("meds.bkp")){
 }
 
 select <- dplyr::select
+ddd <- 'L40'
+prefixo = paste0(getwd(), '/', ddd, '-')
+
 
 ```
 
@@ -98,8 +101,6 @@ models <- soma.treino %>%
 glance(models) %>% 
   select(.model, AIC) 
 ```
-
-O modelo B (ARIMA(0,2,1)(0,0,2)[12]) teve o melhor AIC entre os modelos ajustados (1344.537). 
 
 # Análise de resíduos (soma)
 
@@ -228,6 +229,7 @@ tratamentos %>%
 ```{r rechaveamento de meds}
 meds <- meds %>% 
   mutate(key = paste(no_identificador, via, sep = '_')) %>% 
+  inner_join(tratamentos) %>% 
   as_tsibble(key = key, index = ano_mes)
 ```
 
@@ -261,27 +263,15 @@ AAlguns medicamentos parecem ter maior crescimento quando em presença de compet
 ```{r diferenciada por doses_inducao, periodicidades, riscos e preferencias}
 meds %>% 
   filter(d1 > -200 & d1 < 200) %>% 
-  ggplot(aes(x = as.ordered(doses_inducao), y = d1)) + 
+  ggplot(aes(x = as.ordered(periodicidade), y = d1)) + 
   geom_boxplot() +
-  labs(title = "Por doses_inducao")
+  labs(title = "Por periodicidade")
 
 meds %>% 
   filter(d1 > -200 & d1 < 200) %>% 
-  ggplot(aes(x = as.ordered(periodicidade_min), y = d1)) + 
+  ggplot(aes(x = as.ordered(dose_inducao), y = d1)) + 
   geom_boxplot() +
-  labs(title = "Por periodicidade_min")
-
-meds %>% 
-  filter(d1 > -200 & d1 < 200) %>% 
-  ggplot(aes(x = as.ordered(periodicidade_max), y = d1)) + 
-  geom_boxplot() +
-  labs(title = "Por periodicidade_max")
-
-meds %>% 
-  filter(d1 > -200 & d1 < 200) %>% 
-  ggplot(aes(x = as.ordered(somente_contraindicacao), y = d1)) + 
-  geom_boxplot() +
-  labs(title = "Por somente_contraindicacao")
+  labs(title = "Por dose_inducao")
 
 ```
 
@@ -329,13 +319,11 @@ meds %>%
             total_meses = n())
 ```
 
-Percebe-se que baricitinibe não tem observações suficientes para uma modelagem com os métodos de séries temporais. Dessa forma, este medicamento ficará de fora das análises por hora.
+Tem dados suficientes para metotrexato, mas não para outras drogas.
 
 ```{r tsplot (meds)}
 # removendo os medicamentos não modelados.
 meds.bkp <- meds
-
-meds <- meds %>% filter(!(no_identificador %in% c("BAMGPOCO60432")))
 
 for(i in unique(meds$key)) {
   print(
@@ -347,7 +335,7 @@ for(i in unique(meds$key)) {
 }
 ```
 
-A análise dos gráficos de autocorrelação (ACF) e autocorrelação parcial (PACF) sugerem que todas as séries de medicamentos sigam processos AR(1): ACF decrescente infinito e PACF com pico em lag 1 e zero dali em diante. Salvo algumas exceções, todas as séries parecem bastante estacionárias na média. O uso de abatacepte diminui até quase zero ao final da série, um comportamento que provavelmente não será capturado pelos modelos ajustados. A queda no número de pacientes de etanercepte, contudo, se inicía mais cedo, o que talvez possibilite os modelos que estimem melhor o comportamento subsequente. Por fim, metotrexato intrevenoso apresenta maior variância na série toda relativo aos demais medicamentos.
+As séries de ambas as apresentações de metotrexato parecem ser geradas por processos AR(1)
 
 ```{r modelagem (meds)}
 meds.treino <- meds %>% filter(ano_mes < yearmonth("2020/06")) %>% select(-d1)
@@ -356,10 +344,10 @@ meds.models <- meds.treino %>%
   model(
     A = ARIMA(qt_usuarios ~ 1 + pdq(1, 1, 0) + PDQ(0, 0, 0)),
     B = ARIMA(qt_usuarios),
-    C = ARIMA(qt_usuarios ~ qt_concorrentes + qt_total_usuarios + pdq()),
+    C = ARIMA(qt_usuarios ~ qt_total_usuarios + pdq()),
     D = decomposition_model(
       STL(qt_usuarios ~ trend()),
-      ARIMA(trend ~ qt_concorrentes + qt_total_usuarios),
+      ARIMA(trend ~ qt_total_usuarios),
       NAIVE(remainder)
     ),
     E = ETS(qt_usuarios ~ error("A") + trend("A") + season("N")),
@@ -371,7 +359,7 @@ meds.models %>%
   select(key, B:D)
 ```
 
-Não foi possível ajustar modelos lineares com erros ARIMA, nem modelos de decomposição em trend+remainder para tofacitinibe, leflunomida e metotrexato. Isso se deve a só haver um número de concorrentes para cada uma dessas drogas no decorrer da base de treino. Assim, os modelos que tomam qt_concorrente como parâmetro não foram possíveis de ajustar.
+Para psoríases, não foi considerado o numero de concorrentes nas análises, uma vez que só há dados para metotrexato.
 
 
 ```{r análise de resíduos (acurácia de treino)}
@@ -426,8 +414,7 @@ mm.f.acc.24 <- meds.cast.24 %>%
     union(mm.f.acc.24) %>%
     filter(!is.na(REQM)) %>%
     arrange(key, .model) %>%
-    fill(AIC, .direction = "downup") %>%
-    pivot_longer(cols = c(REQM, winkler), names_to = "metrica") %>%
+    pivot_longer(cols = c(REQM, winkler, AIC), names_to = "metrica") %>%
     filter(!is.na(value)) %>%
     pivot_wider(
       names_from = c(metrica, periodo),
@@ -438,7 +425,7 @@ mm.f.acc.24 <- meds.cast.24 %>%
     mutate(across(starts_with(c(
       "AIC", "REQM", "wink"
     )), ~ round(.x, 2))) %>% 
-    rename(Modelo = .model))
+    rename(Modelo = .model, AIC = AIC.0))
 ```
 
 A tabela acima apresenta as métricas dos modelos quando avaliados quanto aos seu resíduos em relação à base de treino e aos dados reais para 12 e 24 meses. 
@@ -446,54 +433,57 @@ A tabela acima apresenta as métricas dos modelos quando avaliados quanto aos se
 ```{r Avaliação das métricas conjuntamente, somente menores}
 
 for(i in unique(meds$key)){
-  aux <- mm.f.acc %>%
-    filter(key == i) %>% 
-    group_by(key, metrica) %>%
-    slice_min(v.0, n = 2, na_rm = T) %>% 
-    ungroup() %>%
-    union(mm.f.acc %>%
-            filter(key == i) %>% 
-            group_by(key, metrica) %>%
-            slice_min(v.12, n = 2, na_rm = T) %>%
-            ungroup()) %>%
-    union(mm.f.acc %>%
-            filter(key == i) %>% 
-            group_by(key, metrica) %>%
-            slice_min(v.24, n = 2, na_rm = T) %>% ungroup) %>%
-    select(key, .model) %>%
-    unique()
   
-  aux %>% 
-    inner_join(mm.f.acc, by = c("key", ".model")) %>%
-    arrange(key, metrica, .model) %>% 
-    knitr::kable(caption = paste("Modelos para", i, "e suas métricas.")) %>% 
-    # knitr::kable(caption = paste("Modelos para", i, "e suas métricas."), format = "latex") %>%
-    print()
+  boldmap = mm.f.acc %>% 
+    filter(key == i) %>% 
+    mutate(across(starts_with(c("AIC", "REQM", "wink")), ~ (.x == min(.x, na.rm = T)) %in% T))
+
+  mm.f.acc %>% 
+    filter(key == i) %>% 
+    select(-key) %>% 
+    knitr::kable(align = 'c', caption = i) %>%
+    # knitr::kable(align = 'c', caption = i, format = 'latex') %>% 
+    column_spec(2, bold = boldmap$AIC) %>% 
+    column_spec(3, bold = boldmap$REQM.0) %>% 
+    column_spec(4, bold = boldmap$REQM.12) %>% 
+    column_spec(5, bold = boldmap$REQM.24) %>%
+    column_spec(6, bold = boldmap$winkler.12) %>% 
+    column_spec(7, bold = boldmap$winkler.24) %>% 
+  print()
   
   print(
     meds.cast.24 %>%
-      inner_join(aux, by = c("key", ".model")) %>%
+      filter(key == i, !is.na(.mean)) %>% 
       autoplot(meds) +
-      scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y') +
       facet_wrap( ~ .model, scales = "free") +
+      scale_x_yearmonth(date_breaks = '2 years', date_labels='%Y') +
       geom_vline(xintercept = as.Date(max(
         meds.treino$ano_mes
       ) + c(12, 24)), colour = "red") +
-      labs(title = paste("Modelos ajustados para ", i), 
-           caption = "linhas verticais representam 12 e 24 meses de predição.")
+      theme(legend.position="none") 
+      # labs(title = paste("Modelos ajustados para ", i),
+      #      caption = "linhas verticais representam 12 e 24 meses de predição.")
   )
+  
+  ggsave(paste0(prefixo, i, '-models.png'), width = 15, height = 7)
+
 }
 
 ```
 
 Já as tabelas e gráficos acima apresentam somente os modelos com os melhores REQM e escore Winkler. Sendo eles:
   
+# Metotrexato injetável
 
+As métricas apontam para o uso dos modelos D ou E, pois têm os valores mais baixos para REQM dentre os modelos com escores abaixo da mediana. O modelo E mantém seu escore abaixo do ARIMA proposto até o período de 24 meses, enquanto o modelo D, de decomposição, supera-os no período. Por outro lado, as estimativas pontuais do modelo D aproximam melhor os valores observados. Ainda assim, prefere-se a sugestão do uso do modelo E, por ser mais simples que D, e ter escores melhores em prazo mais longo.
+
+# Metotrexato oral
+
+Metotrexato oral tem um crescimento maior em seu número de pacientes a partir de 2019, bem como maior variância. Entre os modelos ajustados, o D (decomposição STL ARIMA(trend) + NAIVE(remainder)) teve as melhores métricas avaliadas no período de validação. Sugere-se o uso deste modelo na predição do comportamento futuro. Ainda que este modelo se apoie em dados desconhecidos no momento da estimativa (quantidade total de pacientes), dado esse número, o desempenho do modelo é melhor que os concorrentes. Dessa forma, sugere-se o uso deste modelo em conjunto com as predições realizadas pelo modelo C para demanda total.
 
 ```{r  selecionados}
-m.selecionados <- tibble(key=c('Demanda total', ''
-                               ), 
-                         nome=c('C', ''))
+m.selecionados <- tibble(key=c('Demanda total', 'METO60453_injetavel', 'METO60453_oral'), 
+                         nome=c('C', 'E', 'D'))
 m.remodelar <- F
 m.comentarios <- 'Devido à alteração repentina de tendência no número total de pacientes em 2019, não se descarta a possibilidade de uma nova alteração futura. Na ocasião, seria importante novos ajustes, com pelo menos 24 meses da nova tendência.'
 ```
@@ -502,5 +492,4 @@ m.comentarios <- 'Devido à alteração repentina de tendência no número total
 save.image(file = "L40.RData") 
 ```
 
-# Conclusões
 

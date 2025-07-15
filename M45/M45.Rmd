@@ -156,24 +156,6 @@ newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(som
 cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = nb.label,
-                ano_mes = unique(cast.12$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast.12 <- cast.12 %>%
-  bind_rows(nb.cast)
-
 sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
@@ -189,24 +171,6 @@ newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(som
 
 cast.24 <- models %>% 
   forecast(new_data = newdata)
-
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) 
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = nb.label,
-                ano_mes = unique(cast.24$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast.24 <- cast.24 %>%
-  bind_rows(nb.cast)
 
 sm.f.acc.24 <- cast.24 %>% 
   accuracy(soma,
@@ -268,7 +232,7 @@ O modelo D (alisamento exponencial com erros multiplicativos) teve melhor REQM e
 
 ```{r}
 
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
   facet_wrap(~ .model, scales = "free") +
   scale_x_yearmonth(date_breaks = '2 years', date_labels='%Y') +
@@ -451,7 +415,8 @@ A análise dos gráficos das funções de autocorrelação (ACF) e autocorrelaç
 Além do proposto, serão ajustados: ARIMA com seleção automática stepwise; LM com erros ARIMA; decomposição em trend + remainder, sendo o trend modelado com ARIMA e o remainder NAIVE; método de alisamento exponencial linear de Holt; alisamento exponencial com erros multiplicativos; LM com componentes de séries temporais.
 
 ```{r Modelagem (meds)}
-meds.treino <- meds %>% filter(ano_mes < yearmonth("2020/06"))
+i = unique(meds$key)[8]
+meds.treino <- meds %>% filter(ano_mes < yearmonth("2020/06") | (key == i & ano_mes < yearmonth("2021/06"))) 
 
 meds.models <- meds.treino %>%
   model(
@@ -500,7 +465,9 @@ A tabela acima aponta para melhores ajustes de acordo com o REQM avaliado na pr�
 ```{r análise de resíduos (acurácia de predição )}
 # meds.models forecast accuracy 12 e 24
 
-newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 12)
+# newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 12)
+newdata <- meds %>% anti_join(meds.treino) %>% 
+  filter(ano_mes <= min(ano_mes) + 11, .by=key)
 
 meds.cast.12 <- meds.models %>% 
   forecast(new_data = newdata)
@@ -515,7 +482,12 @@ mm.f.acc.12 <- meds.cast.12 %>%
   arrange(key, .model)
 
 # 24
-newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 24)
+# newdata <- meds %>% filter(ano_mes > max(meds.treino$ano_mes), ano_mes <= max(meds.treino$ano_mes) + 24)
+
+newdata <- meds %>% anti_join(meds.treino) %>% 
+  append_row(n = 12) %>% 
+  filter(ano_mes <= min(ano_mes) + 23, .by = key) %>% 
+  fill(everything())
 
 meds.cast.24 <- meds.models %>% 
   forecast(new_data = newdata)
@@ -563,8 +535,8 @@ for(i in unique(meds$key)){
   mm.f.acc %>% 
     filter(key == i) %>% 
     select(-key) %>% 
-    # knitr::kable(align = 'c', caption = i) %>% 
-    knitr::kable(align = 'c', caption = i, format = 'latex') %>% 
+    knitr::kable(align = 'c', caption = i) %>%
+    # knitr::kable(align = 'c', caption = i, format = 'latex') %>% 
     column_spec(2, bold = boldmap$AIC) %>% 
     column_spec(3, bold = boldmap$REQM.0) %>% 
     column_spec(4, bold = boldmap$REQM.12) %>% 
@@ -587,9 +559,9 @@ for(i in unique(meds$key)){
       #      caption = "linhas verticais representam 12 e 24 meses de predição.")
   )
   
-  ggsave(paste0(prefixo, i, '-models.png'), width = 15, height = 7)
+  ggsave(paste0(prefixo, i, '-models2.png'), width = 15, height = 7)
 
-}
+# }
 
 ```
 

@@ -177,8 +177,9 @@ cast.24 %>%
 O volume de dados utilzado na modelagem foi bem menor que para outros PCDTs (somente um ano e meio). Por isso, é importante obter mais dados antes de escolher uma modelagem, pois muito do comportamento da difusão pode não ter sido observada ainda. As métricas utilizadas apontam para o uso do ARIMA(0,1,0)c om drift, mas o resultado pode não ser conclusivo.
 
 ```{r}
-m.selecionados <- tibble(key='Demanda total', nome=c('B'))
+m.selecionados <- tibble(key='Demanda total', nome=c('none'))
 m.remodelar <- T
+m.observacoes <- "Há poucos dados para o ajuste de modelos. Assim, o modelo com as melhores métricas pode ainda não ser ideal para a predição."
 ```
 
 ```{r}

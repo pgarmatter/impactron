@@ -181,6 +181,7 @@ O volume de dados utilzado na modelagem foi bem menor que para outros PCDTs (som
 ```{r}
 m.selecionados <- tibble(key='Demanda total', nome=c('none'))
 m.remodelar <- T
+m.observacoes <- "Há poucos dados para o ajuste de modelos. Assim, o modelo com as melhores métricas pode ainda não ser ideal para a predição."
 ```
 
 ```{r}

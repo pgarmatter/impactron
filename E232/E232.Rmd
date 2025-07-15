@@ -174,9 +174,10 @@ análise dos gráficos
 
 ```{r}
 
-cast %>% 
+cast.24 %>% 
   autoplot(soma) +
-  facet_wrap(~ .model, scales = "free") 
+  facet_wrap(~ .model, scales = "free") +
+  theme(legend.position = "none")
 # geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
 
 ```

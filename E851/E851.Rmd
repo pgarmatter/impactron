@@ -95,14 +95,8 @@ models <- soma.treino %>%
         D = ETS(qt_total_usuarios ~ error("M") + trend("A") + season("N")),
         E = TSLM(qt_total_usuarios ~ ano_mes))
 
-quasipoisson = glm(qt_total_usuarios ~ ano_mes, soma.treino, family = quasipoisson())
-
-binomialneg = glm.nb(qt_total_usuarios ~ ano_mes, soma.treino)
-
 glance(models) %>% 
-  select(.model, AIC) %>% 
-  bind_rows(data.frame(.model = c('quasipoisson', 'F'), AIC = c(NA, AIC(binomialneg)))) %>% 
-  arrange(AIC) 
+  select(.model, AIC)
 
 ```
 
@@ -115,24 +109,6 @@ newdata = soma %>% filter(ano_mes >= yearmonth("2021/06"))
 
 cast <- models %>% 
   forecast(new_data = newdata)
-
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(nb.cast) #var da serie
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = 'F',
-                ano_mes = unique(cast$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast <- cast %>%
-  bind_rows(nb.cast)
 
 cast %>% 
   accuracy(soma,
@@ -148,7 +124,8 @@ análise dos gráficos
 
 cast %>% 
   autoplot(soma) +
-  facet_wrap(~ .model, scales = "free") 
+  facet_wrap(~ .model, scales = "free") +
+  theme(legend.position = "none")
 # geom_vline(xintercept = as.Date('2021/06/01'), color = "red") 
 
 ```
@@ -156,6 +133,14 @@ cast %>%
 Ambos os modelos ARIMA superestimaram a difusão, enquanto o modelo AAN teve uma aproximação melhor, ainda que também acima do observado. O comportamento do intervalo preditivo do modelo MAN é muito largo, incluindo valores abaixo de zero, o que o torna inutilizável.
 
 Entre os modelos ajustados para esta série, o recomendado seria o AAN (Alisamento exponencial linear de Holt). Contudo, dado o pequeno volume de dados, seria prudente remodelar no futuro com mais dados (50+).
+
+```{r}
+m.selecionados <- tibble(key=c('Demanda total', 'Demanda total'), 
+                         nome=c('C', 'D')) 
+m.remodelar <- T
+m.observacoes <- "Como só havia 33 observações disponíveis para a modelagem, os modelos foram ajustados com menos do que o ideal para o ajuste. Dessa forma, é importante reavaliação dos modelos com novos dados."
+```
+
 
 ```{r}
 save.image('E851.RData')

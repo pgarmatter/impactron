@@ -192,24 +192,6 @@ newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(som
 cast.12 <- models %>% 
   forecast(new_data = newdata)
 
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) #var da serie ou da série predita? NESSE CASO USEI DA SERIE POIS ESTAVA DANDO P>1
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = nb.label,
-                ano_mes = unique(cast.12$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast.12 <- cast.12 %>%
-  bind_rows(nb.cast)
-
 sm.f.acc.12 <- cast.12 %>% 
   accuracy(soma,
            list(REQM = RMSE,
@@ -225,24 +207,6 @@ newdata = soma %>% filter(ano_mes > max(soma.treino$ano_mes), ano_mes <= max(som
 
 cast.24 <- models %>% 
   forecast(new_data = newdata)
-
-nb.cast = predict.glm(binomialneg, newdata, type="response")
-nb.mean = nb.cast #uma por mes
-nb.var = var(soma$qt_total_usuarios) 
-
-size = nb.mean^2 /(nb.var - nb.mean)
-prob = nb.mean / nb.var
-
-nb.cast = fable(.model = nb.label,
-                ano_mes = unique(cast.24$ano_mes),
-                qt_total_usuarios = dist_negative_binomial(size, prob),
-                mean = nb.cast,
-                d1 = c(NA, diff(nb.cast)),
-                response = 'qt_total_usuarios',
-                distribution = 'qt_total_usuarios')
-
-cast.24 <- cast.24 %>%
-  bind_rows(nb.cast)
 
 sm.f.acc.24 <- cast.24 %>% 
   accuracy(soma,
@@ -280,13 +244,15 @@ No caso da modelagem com mais dados, o modelo de Holt teve o menor REQM (28.7139
 ```{r}
 cast.24 %>% 
   autoplot(soma) +
-  facet_wrap(~ .model, scales = "free") 
+  facet_wrap(~ .model, scales = "free") +
+  theme(legend.position = "none")
 ```
 
 Frente à inserção dos doze meses subsequentes à primeira análise, foram obtidos modelos melhores, com exceção do ARIMA automático. O AAN tem ajuste melhor tanto na média quanto no intervalo preditivo (C).
 
 ```{r}
 m.selecionados <- tibble(key='Demanda total', nome='C')
+m.remodelar <- F
 ```
 
 
