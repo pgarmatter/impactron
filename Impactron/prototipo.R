@@ -109,6 +109,7 @@ ui <- page_sidebar(
       title = "Modelos",
       tableOutput("modelos"),
       textOutput("aviso.modelos"),
+      textOutput("observacoes.modelos"),
       hr(style = "margin: 1px"),
       htmlOutput("accuracy"),
       uiOutput("modelos.graficos", fill = T)
@@ -322,6 +323,12 @@ server <- function(input, output, session) {
     })
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
   
+  m.obs = reactive({
+    with(envs[[cid]], {
+      get0('m.observacoes', ifnotfound = '')
+    })
+  }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F)
+  
   output$aviso.modelos = renderText({
     qt.select = sum(m.nomes()$selecionado)
     if(qt.select == 0){
@@ -334,6 +341,10 @@ server <- function(input, output, session) {
     aviso
   }) %>% bindEvent(valida(input$droga, series()), ignoreInit = F, ignoreNULL = T)
 
+  output$observacoes.modelos = renderText({
+    m.obs()
+  })
+  
   output$modelos = renderTable({
     m.nomes() %>% 
       select(-starts_with('key')) %>% 
@@ -433,7 +444,7 @@ server <- function(input, output, session) {
     return(plotOutput(outputId = "forecast.graficos.plot"))
   }) %>%
     bindEvent(input$forecast)
-  
+
   forecast.data = reactive({
     meses = min(max(input$meses, 0), 60)
     

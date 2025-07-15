@@ -48,6 +48,7 @@ Como para E740 (Doença de Pompe), há poucos dados e pacientes para ajustarmos 
 ```{r}
 m.selecionados <- tibble(key='Demanda total', nome=c('none'))
 m.remodelar <- T
+m.observacoes <- 'Há poucos dados para o ajuste da série. Seriam necessários cerca de 50 ou mais observações para a modelagem correta.'
 ```
 
 ```{r}
