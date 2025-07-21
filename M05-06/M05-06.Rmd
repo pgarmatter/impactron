@@ -286,7 +286,7 @@ meds %>%
   labs(title = "Por qt_concorrentes")
 ```
 
-AAlguns medicamentos parecem ter maior crescimento quando em presença de competidores, enquanto outros passam a perder pacientes quanto mais medicamentos são incorporados. Em especial, esse comportamento se observa em maior intensidade na incorporação de baricitinibe, o que diminuiu a taxa de crescimento de golimumabe, adalimumabe, certolizumabe pegol, abatacepte e tocilizumabe.
+Alguns medicamentos parecem ter maior crescimento quando em presença de competidores, enquanto outros passam a perder pacientes quanto mais medicamentos são incorporados. Em especial, esse comportamento se observa em maior intensidade na incorporação de baricitinibe, o que diminuiu a taxa de crescimento de golimumabe, adalimumabe, certolizumabe pegol, abatacepte e tocilizumabe.
 
 ```{r diferenciada por doses_inducao, periodicidades, riscos e preferencias}
 meds %>% 
@@ -520,7 +520,7 @@ Já as tabelas e gráficos acima apresentam somente os modelos com os melhores R
 
 ### Abatacepte intravenoso
 
-Abatacepte intravenoso iniciou uma queda no número de pacientes por volta de 2020, chegando a 50 pacientes em fevereiro de 2022. Apesar de os modelos serem ajustadscale_x_yearmonth(date_breaks = '1 year', date_labels='%Y')os com dados até maio de 2020, alguns foram capazes de predizer a continuada queda na quantidade de pacientes. O modelo proposto A (ARIMA(1,1,0) com drift) apesar de ter um bom REQM para os primeiros 12 meses, superestimou as quantidades do periodo mais longo, de 24 meses. O modelo D (decomposição em trend + remainder), por outro lado, manteve a estimativa da média mais próxima aos dados observados. Apesar de não conter completamente os dados reais em seu intervalo preditivo, o modelo D teve o melhor escore (1784.3700) entre os ajustados, seguido do A (2252.1044). A análise dos gráficos evidencia a diferença entre os modelos, destacando o desempenho do modelo D como a melhor opção entre os ajustados.
+Abatacepte intravenoso iniciou uma queda no número de pacientes por volta de 2020, chegando a 50 pacientes em fevereiro de 2022. Apesar de os modelos serem ajustados com dados até maio de 2020, alguns foram capazes de predizer a continuada queda na quantidade de pacientes. O modelo proposto A (ARIMA(1,1,0) com drift) apesar de ter um bom REQM para os primeiros 12 meses, superestimou as quantidades do periodo mais longo, de 24 meses. O modelo D (decomposição em trend + remainder), por outro lado, manteve a estimativa da média mais próxima aos dados observados. Apesar de não conter completamente os dados reais em seu intervalo preditivo, o modelo D teve o melhor escore (1784.3700) entre os ajustados, seguido do A (2252.1044). A análise dos gráficos evidencia a diferença entre os modelos, destacando o desempenho do modelo D como a melhor opção entre os ajustados.
 
 ### Abatacepte subcutaneo
 
@@ -533,10 +533,6 @@ Como para outras doenças, adalimumabe teve uma queda importante no número de p
 ### Certolizumabe pegol
 
 Para certolizumabe pegol, os dois modelos ARIMA, A e B, têm os melhores REQMs para 12 e 24 meses, respectivamente, sendo 143.3786 o REQM de A nos doze primeiros meses, e 187.2704 o REQM de B nos 24 meses. O modelo A, ARIMA(1,1,0) com drift, tem também o melhor desempenho com relação aos escore (767.5026 em 12 meses e 1059.3841 em 24). O modelo B (ARIMA(0,2,2)), por outro lado, teve o terceiro melhor escore tanto para 12 (961.4207) quanto para 24 meses (1967.7438). Apesar de o modelo A ter a pior aproximação da média em 24 meses (REQM 327.8316), é o modelo que melhor acomoda os dados em um intervalo preditivo estreito. Sendo assim, é um bom candidato a ser utilizado para a predição da difusão de certolizumabe pegol. Se houver a necessidade de uma melhor aproximação pontual, com uma tolerância maior a intervalos preditivos largos, o modelo a se utilizar seria o B.
-
-### Citrato de tofacitinibe
-
-Apesar de o modelo B (ARIMA(0,1,2) com drift) ter o melhor ajuste na base de treino, teve o pior desempenho no periodo de validação, tanto em REQM quanto em escore. O modelo A (ARIMA(1,1,0) com drift) por outro lado, teve as melhores estimativas pontuais (REQM 292.3375 e 951.2554 em 12 e 24 meses respectivamente), mas ficou em segundo lugar quando avaliados os escores (3987.7127 em 12 meses contra 3027.1193 do modelo E, e 5862.1032 em 24 meses contra 4174.0532 do mesmo modelo). Como todos os modelos desviam dos dados observados após o primeiro ano decorrido, sugere-se o uso do modelo A, uma vez que seu intervalo mais largo possibilita uma gama maior de valores ao decorrer do tempo.
 
 ### Etanercepte
 
@@ -570,6 +566,11 @@ Para rituximabe, o modelo cuja predição melhor se aproximou dos dados reais fo
 
 Apesar de todos os modelos subestimarem a difusão de tocilizumabe, todas as métricas apontam para o uso do modelo proposto A (ARIMA(1,1,0) com drift). O REQM para 12 meses foi o mais baixo (400.5904), seguido de E (suavização exponencial de Holt) (412.5250). Teve o segundo melhor REQM para 24 meses (404.0367) logo atrás de D (modelo de decomposição trend + remainder) (com 389.1621). Teve os melhores escores na base de validação: 2012.7949 em 12 meses e 1663.8949 em 24 meses, seguidos de 2054.9857 e 1841.4376 nos mesmos períodos para o modelo D.
 
+
+### Citrato de tofacitinibe
+
+Apesar de o modelo B (ARIMA(0,1,2) com drift) ter o melhor ajuste na base de treino, teve o pior desempenho no periodo de validação, tanto em REQM quanto em escore. O modelo A (ARIMA(1,1,0) com drift) por outro lado, teve as melhores estimativas pontuais (REQM 292.3375 e 951.2554 em 12 e 24 meses respectivamente), mas ficou em segundo lugar quando avaliados os escores (3987.7127 em 12 meses contra 3027.1193 do modelo E, e 5862.1032 em 24 meses contra 4174.0532 do mesmo modelo). Como todos os modelos desviam dos dados observados após o primeiro ano decorrido, sugere-se o uso do modelo A, uma vez que seu intervalo mais largo possibilita uma gama maior de valores ao decorrer do tempo.
+
 ```{r  selecionados}
 m.selecionados <- tibble(key=c('Demanda total', 
                           'ABAT60432_intravenoso',
@@ -585,7 +586,7 @@ m.selecionados <- tibble(key=c('Demanda total',
                           'METO60453_oral',
                           'RITU60468_intravenoso',
                           'TOCI60469_intravenoso'), 
-                         nome=c('B', 'C', 
+                         nome=c('B', 'D', 
                                 'A', 'B', 
                                 'D',
                                 'A', 'B',

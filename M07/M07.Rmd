@@ -516,7 +516,7 @@ m.selecionados <- tibble(key=c('Demanda total',
                                 'A', 'E',
                                 'B', 'F'))
 m.remodelar <- T
-m.comentarios <- 'Nenhum dos modelos ajustados para secuquinumabe foram satisfatórios. Contudo, o modelo F foi o mais bem avaliado dentre os ajustados. Idealmente, deve-se fazer nova modelagem utilizando dados mais recentes. Ademais, não foi possível ajustar modelos para tofacitinibe e certolizumabe pegol, devido ao baixo número de observações.'
+m.observacoes <- 'Nenhum dos modelos ajustados para secuquinumabe foram satisfatórios. Contudo, o modelo F foi o mais bem avaliado dentre os ajustados. Idealmente, deve-se fazer nova modelagem utilizando dados mais recentes. Ademais, não foi possível ajustar modelos para tofacitinibe e certolizumabe pegol, devido ao baixo número de observações.'
 ```
 
 

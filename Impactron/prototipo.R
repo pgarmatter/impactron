@@ -233,18 +233,20 @@ server <- function(input, output, session) {
   })
   
   output$decomposicao = renderPlot({
-    data() %>% model(STL(qt_usuarios ~ trend() + season())) %>% 
+    data() %>% fill_gaps() %>% 
+      fill(everything(), .direction = "downup") %>% 
+      model(STL(qt_usuarios ~ trend() + season())) %>% 
       components() %>% 
       autoplot() + scale_x_yearmonth(date_breaks = '1 year', date_labels='%Y') + 
       labs(title=NULL)
   })
     
   output$acf = renderPlot({
-    data() %>% ACF(qt_usuarios) %>% autoplot()
+    data() %>% fill_gaps() %>% ACF(qt_usuarios) %>% autoplot()
   })
   
   output$pacf = renderPlot({
-    data() %>% PACF(qt_usuarios) %>% autoplot()
+    data() %>% fill_gaps() %>% PACF(qt_usuarios) %>% autoplot()
   })
   
   output$cpgram = renderPlot({
